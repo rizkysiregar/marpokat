@@ -79,6 +79,30 @@ func (q *Queries) GetTenantByAPIKey(ctx context.Context, apiKey string) (Tenant,
 	return i, err
 }
 
+const getTenantByID = `-- name: GetTenantByID :one
+SELECT id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at FROM tenants WHERE id = $1
+`
+
+func (q *Queries) GetTenantByID(ctx context.Context, id uuid.UUID) (Tenant, error) {
+	row := q.db.QueryRow(ctx, getTenantByID, id)
+	var i Tenant
+	err := row.Scan(
+		&i.ID,
+		&i.Slug,
+		&i.Name,
+		&i.ApiKey,
+		&i.ApiSecretEnc,
+		&i.Config,
+		&i.FcmCredentialsEnc,
+		&i.WebhookUrl,
+		&i.WebhookSecretEnc,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.DisabledAt,
+	)
+	return i, err
+}
+
 const getTenantBySlug = `-- name: GetTenantBySlug :one
 SELECT id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at FROM tenants WHERE slug = $1
 `

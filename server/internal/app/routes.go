@@ -11,6 +11,7 @@ import (
 
 	"github.com/rizkysiregar/marpokat/server/internal/auth"
 	"github.com/rizkysiregar/marpokat/server/internal/channel"
+	"github.com/rizkysiregar/marpokat/server/internal/device"
 	"github.com/rizkysiregar/marpokat/server/internal/message"
 	"github.com/rizkysiregar/marpokat/server/internal/platform/health"
 	"github.com/rizkysiregar/marpokat/server/internal/platform/httpx"
@@ -72,6 +73,7 @@ func PublicRoutes(d Deps) http.Handler {
 			Options: opts, Log: d.Log, Metrics: d.Metrics,
 		}).Register(mux, mw.User)
 	}
+	device.NewHandler(device.NewService(d.Pool), d.Log).Register(mux, mw.User)
 	channel.NewHandler(channels, d.Log).Register(mux, mw.User, mw.Server)
 	message.NewHandler(messages, d.Log).Register(mux, mw.User, mw.Server)
 	mux.HandleFunc("/", httpx.NotFound)

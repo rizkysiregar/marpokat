@@ -8,9 +8,11 @@ package testdb
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -25,8 +27,17 @@ import (
 )
 
 var (
-	pool      *pgxpool.Pool
-	redisConf config.Redis
+	pool *pgxpool.Pool
+
+	// Redis and RabbitMQ start the first time a test asks for them, so packages that need only Postgres stay fast.
+	redisOnce  sync.Once
+	redisConf  config.Redis
+	redisCtr   testcontainers.Container
+	redisErr   error
+	rabbitOnce sync.Once
+	rabbitConf config.RabbitMQ
+	rabbitCtr  testcontainers.Container
+	rabbitErr  error
 )
 
 // Main is called from TestMain: it starts the container, migrates, runs the tests and cleans up.
@@ -79,40 +90,101 @@ func run(m *testing.M) int {
 	}
 	defer pool.Close()
 
-	rctr, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
-		ContainerRequest: testcontainers.ContainerRequest{
-			Image:        "redis:7-alpine",
-			ExposedPorts: []string{"6379/tcp"},
-			WaitingFor:   wait.ForLog("Ready to accept connections").WithStartupTimeout(60 * time.Second),
-		},
-		Started: true,
-	})
-	if err != nil {
-		slog.Error("start redis container", "error", err)
-		return 1
-	}
-	defer func() { _ = testcontainers.TerminateContainer(rctr) }()
-	rhost, err := rctr.Host(ctx)
-	if err != nil {
-		slog.Error("redis host", "error", err)
-		return 1
-	}
-	rport, err := rctr.MappedPort(ctx, "6379/tcp")
-	if err != nil {
-		slog.Error("redis port", "error", err)
-		return 1
-	}
-	redisConf = config.Redis{Host: rhost, Port: int(rport.Num()), KeyPrefix: "marpokat-test:"}
+	defer func() {
+		for _, c := range []testcontainers.Container{redisCtr, rabbitCtr} {
+			if c != nil {
+				_ = testcontainers.TerminateContainer(c)
+			}
+		}
+	}()
 	return m.Run()
 }
 
-// Redis returns the settings of the shared Redis container. Tests stay apart through the ids in their keys.
+// Redis returns the settings of the shared Redis container, starting it on first use. Tests stay apart through the
+// ids in their keys.
 func Redis(t *testing.T) config.Redis {
 	t.Helper()
-	if redisConf.Host == "" {
-		t.Fatal("testdb: Main was not called from TestMain")
+	redisOnce.Do(func() {
+		ctx := context.Background()
+		redisCtr, redisErr = testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+			ContainerRequest: testcontainers.ContainerRequest{
+				Image:        "redis:7-alpine",
+				ExposedPorts: []string{"6379/tcp"},
+				WaitingFor:   wait.ForLog("Ready to accept connections").WithStartupTimeout(60 * time.Second),
+			},
+			Started: true,
+		})
+		if redisErr != nil {
+			return
+		}
+		host, err := redisCtr.Host(ctx)
+		if err != nil {
+			redisErr = err
+			return
+		}
+		port, err := redisCtr.MappedPort(ctx, "6379/tcp")
+		if err != nil {
+			redisErr = err
+			return
+		}
+		redisConf = config.Redis{Host: host, Port: int(port.Num()), KeyPrefix: "marpokat-test:"}
+	})
+	if redisErr != nil {
+		t.Fatalf("testdb: redis container: %v", redisErr)
 	}
 	return redisConf
+}
+
+// RabbitMQ returns the settings of the shared RabbitMQ container (default vhost, user marpokat), starting it on
+// first use. Tests stay apart through the name prefix of their exchanges and queues.
+func RabbitMQ(t *testing.T) config.RabbitMQ {
+	t.Helper()
+	rabbitOnce.Do(func() {
+		ctx := context.Background()
+		rabbitCtr, rabbitErr = testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+			ContainerRequest: testcontainers.ContainerRequest{
+				Image:        "rabbitmq:4-alpine",
+				ExposedPorts: []string{"5672/tcp"},
+				// the default guest user may only connect from localhost, which a mapped port is not
+				Env:        map[string]string{"RABBITMQ_DEFAULT_USER": "marpokat", "RABBITMQ_DEFAULT_PASS": "marpokat"},
+				WaitingFor: wait.ForLog("Server startup complete").WithStartupTimeout(120 * time.Second),
+			},
+			Started: true,
+		})
+		if rabbitErr != nil {
+			return
+		}
+		host, err := rabbitCtr.Host(ctx)
+		if err != nil {
+			rabbitErr = err
+			return
+		}
+		port, err := rabbitCtr.MappedPort(ctx, "5672/tcp")
+		if err != nil {
+			rabbitErr = err
+			return
+		}
+		rabbitConf = config.RabbitMQ{Host: host, Port: int(port.Num()), Username: "marpokat", Password: "marpokat", VirtualHost: "/"}
+	})
+	if rabbitErr != nil {
+		t.Fatalf("testdb: rabbitmq container: %v", rabbitErr)
+	}
+	return rabbitConf
+}
+
+// RabbitCtl runs rabbitmqctl inside the container, to take the broker away and bring it back (stop_app, start_app)
+// without changing its address.
+func RabbitCtl(t *testing.T, args ...string) {
+	t.Helper()
+	RabbitMQ(t)
+	code, out, err := rabbitCtr.Exec(context.Background(), append([]string{"rabbitmqctl"}, args...))
+	if err != nil {
+		t.Fatalf("rabbitmqctl %v: %v", args, err)
+	}
+	if code != 0 {
+		body, _ := io.ReadAll(out)
+		t.Fatalf("rabbitmqctl %v exited with %d: %s", args, code, fmt.Sprint(string(body)))
+	}
 }
 
 // Pool returns the shared pool. Only valid inside tests run through Main.

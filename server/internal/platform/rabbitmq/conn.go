@@ -50,6 +50,11 @@ func dial(url string) (*amqp.Connection, error) {
 	})
 }
 
+// SetBackoff changes the delays between connection attempts (default 500ms to 30s). Call before Run.
+func (c *Conn) SetBackoff(min, max time.Duration) {
+	c.minBackoff, c.maxBackoff = min, max
+}
+
 // Run connects and keeps the connection alive until ctx is done, then closes it.
 func (c *Conn) Run(ctx context.Context) {
 	attempt := 0

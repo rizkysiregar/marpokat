@@ -51,3 +51,19 @@ RETURNING cm.last_read_seq;
 
 -- name: InsertOutbox :exec
 INSERT INTO outbox (tenant_id, topic, payload) VALUES ($1, $2, $3);
+
+-- name: ListPushRecipients :many
+-- Who could be sent a push for a message: active members other than the sender who are not muted and have not read it
+-- yet, with the unread count to show. Whether they are online is decided later, from presence.
+SELECT cm.user_id,
+       (SELECT count(*) FROM (
+            SELECT 1 FROM messages m
+            WHERE m.channel_id = cm.channel_id AND m.seq > cm.last_read_seq AND m.type <> 'system'
+              AND m.deleted_at IS NULL AND m.sender_id IS DISTINCT FROM cm.user_id
+            LIMIT 100) unread)::int AS unread_count
+FROM channel_members cm
+JOIN users u ON u.id = cm.user_id
+WHERE cm.channel_id = sqlc.arg('channel_id') AND cm.tenant_id = sqlc.arg('tenant_id') AND cm.left_at IS NULL
+  AND cm.user_id <> sqlc.arg('sender_id') AND u.deleted_at IS NULL
+  AND cm.last_read_seq < sqlc.arg('seq')::bigint
+  AND (cm.muted_until IS NULL OR cm.muted_until <= now());

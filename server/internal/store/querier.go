@@ -6,6 +6,7 @@ package store
 
 import (
 	"context"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -20,8 +21,14 @@ type Querier interface {
 	// With check_frozen, a frozen channel matches nothing.
 	BumpChannelSeq(ctx context.Context, arg BumpChannelSeqParams) (BumpChannelSeqRow, error)
 	CountActiveMembers(ctx context.Context, arg CountActiveMembersParams) (int32, error)
+	CountOutboxPending(ctx context.Context) (int64, error)
 	// The tenants table is the only one queried without tenant_id (PLAN D1).
 	CreateTenant(ctx context.Context, arg CreateTenantParams) (Tenant, error)
+	// For tokens the push service reported as no longer valid, whoever owned them.
+	DeleteDeviceByToken(ctx context.Context, arg DeleteDeviceByTokenParams) error
+	DeleteDeviceOfUser(ctx context.Context, arg DeleteDeviceOfUserParams) (int64, error)
+	// A bounded batch per call: the cleaner repeats until nothing is left, so one call never holds a long lock.
+	DeleteOutboxPublishedBefore(ctx context.Context, publishedAt *time.Time) (int64, error)
 	DeleteUserDevices(ctx context.Context, arg DeleteUserDevicesParams) error
 	GetChannel(ctx context.Context, arg GetChannelParams) (Channel, error)
 	GetChannelByDMKey(ctx context.Context, arg GetChannelByDMKeyParams) (Channel, error)
@@ -30,6 +37,7 @@ type Querier interface {
 	GetMessageByClientID(ctx context.Context, arg GetMessageByClientIDParams) (MessageDetail, error)
 	GetMessageBySeq(ctx context.Context, arg GetMessageBySeqParams) (MessageDetail, error)
 	GetTenantByAPIKey(ctx context.Context, apiKey string) (Tenant, error)
+	GetTenantByID(ctx context.Context, id uuid.UUID) (Tenant, error)
 	GetTenantBySlug(ctx context.Context, slug string) (Tenant, error)
 	GetUserByExternalID(ctx context.Context, arg GetUserByExternalIDParams) (User, error)
 	GetUserByID(ctx context.Context, arg GetUserByIDParams) (User, error)
@@ -50,18 +58,29 @@ type Querier interface {
 	// The other member of each given DM, as seen by user_id. channel_ids is a comma separated list: with the simple
 	// protocol (pgbouncer) the driver cannot encode a uuid array, and a string it can.
 	ListDMPeers(ctx context.Context, arg ListDMPeersParams) ([]ListDMPeersRow, error)
+	// user_ids is a comma separated list of uuids, see MarkOutboxPublished.
+	ListDevicesOfUsers(ctx context.Context, arg ListDevicesOfUsersParams) ([]ListDevicesOfUsersRow, error)
 	// channel_ids is a comma separated list, see ListDMPeers.
 	ListLastMessages(ctx context.Context, arg ListLastMessagesParams) ([]MessageDetail, error)
 	ListMemberExternalIDs(ctx context.Context, arg ListMemberExternalIDsParams) ([]string, error)
 	ListMembers(ctx context.Context, arg ListMembersParams) ([]ListMembersRow, error)
 	// History, newest first. before_seq 0 means from the latest.
 	ListMessages(ctx context.Context, arg ListMessagesParams) ([]MessageDetail, error)
+	// Who could be sent a push for a message: active members other than the sender who are not muted and have not read it
+	// yet, with the unread count to show. Whether they are online is decided later, from presence.
+	ListPushRecipients(ctx context.Context, arg ListPushRecipientsParams) ([]ListPushRecipientsRow, error)
 	ListTenants(ctx context.Context) ([]Tenant, error)
 	// The channels of one user, newest activity first. Without since only active memberships; with since the channels
 	// changed after it, including those the user left (the client drops them from its cache). channel_id narrows it to one.
 	ListUserChannels(ctx context.Context, arg ListUserChannelsParams) ([]ListUserChannelsRow, error)
 	// Serialises changes to one channel (members, name, sends) until the transaction ends.
 	LockChannel(ctx context.Context, arg LockChannelParams) (Channel, error)
+	// The oldest unpublished events, locked for this transaction. Another worker skips them instead of waiting, so any
+	// number of workers can run (PLAN D7). Only the partial index on unpublished rows is scanned.
+	LockOutboxBatch(ctx context.Context, limit int32) ([]LockOutboxBatchRow, error)
+	MarkOutboxFailed(ctx context.Context, arg MarkOutboxFailedParams) error
+	// ids is a comma separated list: the driver cannot encode an array in the simple protocol (see queries/channels.sql).
+	MarkOutboxPublished(ctx context.Context, ids string) error
 	// Moves the read marker forward only, and never past the end of the channel.
 	MarkRead(ctx context.Context, arg MarkReadParams) (int64, error)
 	// Oldest admin, else the oldest member.
@@ -73,11 +92,15 @@ type Querier interface {
 	SoftDeleteChannel(ctx context.Context, arg SoftDeleteChannelParams) error
 	// Everything that changed after the cursor, oldest change first (PLAN D8).
 	SyncMessages(ctx context.Context, arg SyncMessagesParams) ([]MessageDetail, error)
+	// Keeps the most recently registered tokens of a user: old phones that never unregistered must not pile up.
+	TrimDevicesOfUser(ctx context.Context, arg TrimDevicesOfUserParams) error
 	UpdateChannelProfile(ctx context.Context, arg UpdateChannelProfileParams) (Channel, error)
 	UpdateTenantConfig(ctx context.Context, arg UpdateTenantConfigParams) (int64, error)
 	UpdateTenantFCMCredentials(ctx context.Context, arg UpdateTenantFCMCredentialsParams) (int64, error)
 	UpdateTenantSecret(ctx context.Context, arg UpdateTenantSecretParams) (int64, error)
 	UpdateTenantWebhook(ctx context.Context, arg UpdateTenantWebhookParams) (int64, error)
+	// A push token belongs to whoever registered it last (shared device, account switch).
+	UpsertDevice(ctx context.Context, arg UpsertDeviceParams) error
 	// Re-upserting a deleted user brings it back: the tenant decides who exists.
 	UpsertUser(ctx context.Context, arg UpsertUserParams) (User, error)
 }

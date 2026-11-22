@@ -532,7 +532,11 @@ paths:
     post:
       tags: [Devices]
       summary: Register a push token for the authenticated user
-      description: A token registered by another user of the same tenant moves to this user (shared device, account switch).
+      description: |
+        Call it on login and whenever FCM gives the app a new token. A token registered by another user of the same
+        tenant moves to this user (shared device, account switch). A user keeps their 10 most recently registered
+        tokens. Tokens that FCM reports as no longer valid are removed automatically. See spec/events.md, section 11,
+        for when a push is sent and what it contains.
       operationId: registerDevice
       requestBody:
         required: true

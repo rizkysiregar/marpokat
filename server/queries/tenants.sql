@@ -30,3 +30,6 @@ UPDATE tenants SET webhook_url = $2, webhook_secret_enc = $3 WHERE id = $1;
 UPDATE tenants
 SET disabled_at = CASE WHEN sqlc.arg(disabled)::boolean THEN coalesce(disabled_at, now()) ELSE NULL END
 WHERE id = $1;
+
+-- name: GetTenantByID :one
+SELECT * FROM tenants WHERE id = $1;

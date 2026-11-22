@@ -294,6 +294,60 @@ func (q *Queries) ListMessages(ctx context.Context, arg ListMessagesParams) ([]M
 	return items, nil
 }
 
+const listPushRecipients = `-- name: ListPushRecipients :many
+SELECT cm.user_id,
+       (SELECT count(*) FROM (
+            SELECT 1 FROM messages m
+            WHERE m.channel_id = cm.channel_id AND m.seq > cm.last_read_seq AND m.type <> 'system'
+              AND m.deleted_at IS NULL AND m.sender_id IS DISTINCT FROM cm.user_id
+            LIMIT 100) unread)::int AS unread_count
+FROM channel_members cm
+JOIN users u ON u.id = cm.user_id
+WHERE cm.channel_id = $1 AND cm.tenant_id = $2 AND cm.left_at IS NULL
+  AND cm.user_id <> $3 AND u.deleted_at IS NULL
+  AND cm.last_read_seq < $4::bigint
+  AND (cm.muted_until IS NULL OR cm.muted_until <= now())
+`
+
+type ListPushRecipientsParams struct {
+	ChannelID uuid.UUID
+	TenantID  uuid.UUID
+	SenderID  uuid.UUID
+	Seq       int64
+}
+
+type ListPushRecipientsRow struct {
+	UserID      uuid.UUID
+	UnreadCount int32
+}
+
+// Who could be sent a push for a message: active members other than the sender who are not muted and have not read it
+// yet, with the unread count to show. Whether they are online is decided later, from presence.
+func (q *Queries) ListPushRecipients(ctx context.Context, arg ListPushRecipientsParams) ([]ListPushRecipientsRow, error) {
+	rows, err := q.db.Query(ctx, listPushRecipients,
+		arg.ChannelID,
+		arg.TenantID,
+		arg.SenderID,
+		arg.Seq,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListPushRecipientsRow{}
+	for rows.Next() {
+		var i ListPushRecipientsRow
+		if err := rows.Scan(&i.UserID, &i.UnreadCount); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const markRead = `-- name: MarkRead :one
 UPDATE channel_members cm
 SET last_read_seq = GREATEST(cm.last_read_seq, LEAST($1::bigint, c.last_seq))

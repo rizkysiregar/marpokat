@@ -202,6 +202,26 @@ func (s *Service) SetDisabled(ctx context.Context, slug string, disabled bool) e
 	return nil
 }
 
+// FCMCredentials returns the decrypted Firebase service account of an enabled tenant, and false when the tenant has
+// none (it has not asked for push notifications) or is disabled.
+func (s *Service) FCMCredentials(ctx context.Context, tenantID uuid.UUID) ([]byte, bool, error) {
+	row, err := s.q.GetTenantByID(ctx, tenantID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, fmt.Errorf("tenant: load: %w", err)
+	}
+	if row.DisabledAt != nil || len(row.FcmCredentialsEnc) == 0 {
+		return nil, false, nil
+	}
+	plain, err := s.box.Open(row.FcmCredentialsEnc, secretContext(row.ID, "fcm_credentials"))
+	if err != nil {
+		return nil, false, fmt.Errorf("tenant %s: FCM credentials: %w", row.Slug, err)
+	}
+	return plain, true, nil
+}
+
 // SetFCMCredentials stores the Firebase service account JSON used to send pushes for this tenant (M4).
 func (s *Service) SetFCMCredentials(ctx context.Context, slug string, serviceAccountJSON []byte) error {
 	var sa struct {

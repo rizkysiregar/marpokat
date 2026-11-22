@@ -315,6 +315,30 @@ decides how to display it:
 
 FCM data values are strings. The `marpokat` key lets the app tell Marpokat pushes from its own.
 
+### 11.1 Who is sent a push, and when
+
+A device is sent a push for a new text or media message when **all** of this holds:
+
+- the user is an active member, not the sender, and did not mute the channel (`muted_until`);
+- the user has not read the message yet (`last_read_seq` below its `seq`);
+- the user has **no live connection**, on any device: someone looking at the chat on the web is not rung on their phone;
+- the message is not older than 10 minutes when it is handled: after an outage or a backlog, notifications about old
+  messages are skipped;
+- the app configured push for its tenant (a Firebase service account, `marpokat tenant set-fcm`).
+
+System messages (member added, renamed, ...) never send a push. The message is a data message with high priority
+(`android.priority: HIGH`, `webpush Urgency: high`) that expires after an hour. The app builds the notification itself,
+from the data, in the language of its user.
+
+### 11.2 Delivery
+
+Pushes are sent by a worker that reads events from RabbitMQ, so they do not slow down sending a message and survive
+the outage of the broker: events wait in a table until it is back. A push that fails for a reason worth retrying (FCM
+overloaded, a network problem, expired authorisation) is tried again after 10 seconds, a minute and 10 minutes, then
+given up on (it lands in a dead letter queue that operators watch). What was already delivered is never sent twice,
+per device. A token FCM reports as unknown is removed from the user's devices (`POST /v1/devices` registers a fresh
+one). Registering is the app's job: on login, and whenever FCM rotates the token.
+
 ## 12. Webhook payload (M8)
 
 `POST` to the tenant's webhook URL, header `X-Marpokat-Signature: sha256=<hex HMAC of the raw body with the

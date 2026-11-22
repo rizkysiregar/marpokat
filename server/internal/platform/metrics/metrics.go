@@ -19,6 +19,16 @@ type Registry struct {
 	WSClosed          *prometheus.CounterVec
 	WSFramesIn        *prometheus.CounterVec
 	WSEventsDelivered *prometheus.CounterVec
+
+	OutboxPending         prometheus.Gauge
+	OutboxPublished       prometheus.Counter
+	OutboxPublishFailures prometheus.Counter
+	OutboxLag             prometheus.Histogram
+	QueueMessages         *prometheus.GaugeVec
+	ConsumerHandled       *prometheus.CounterVec
+	PushSent              *prometheus.CounterVec
+	PushFailed            *prometheus.CounterVec
+	PushSkipped           *prometheus.CounterVec
 }
 
 func New(version string) *Registry {
@@ -62,8 +72,47 @@ func New(version string) *Registry {
 			Name: "marpokat_ws_events_delivered_total",
 			Help: "Events written to client sockets, by type.",
 		}, []string{"type"}),
+		OutboxPending: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "marpokat_outbox_pending",
+			Help: "Events committed but not yet handed to RabbitMQ. Grows while the broker is down.",
+		}),
+		OutboxPublished: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "marpokat_outbox_published_total",
+			Help: "Events handed to RabbitMQ (and confirmed by it).",
+		}),
+		OutboxPublishFailures: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "marpokat_outbox_publish_failures_total",
+			Help: "Batches the relay could not publish.",
+		}),
+		OutboxLag: prometheus.NewHistogram(prometheus.HistogramOpts{
+			Name:    "marpokat_outbox_lag_seconds",
+			Help:    "Time from an event being committed to it being published.",
+			Buckets: []float64{.05, .1, .25, .5, 1, 2.5, 5, 15, 60, 300, 1800},
+		}),
+		QueueMessages: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "marpokat_queue_messages",
+			Help: "Messages waiting in a RabbitMQ queue. A dead letter queue (*.dlq) that is not empty needs a look.",
+		}, []string{"queue"}),
+		ConsumerHandled: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "marpokat_consumer_handled_total",
+			Help: "Messages a consumer finished with: ok, retry (sent to a retry queue) or dead (dead lettered).",
+		}, []string{"queue", "result"}),
+		PushSent: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "marpokat_push_sent_total",
+			Help: "Push notifications accepted by FCM, by platform.",
+		}, []string{"platform"}),
+		PushFailed: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "marpokat_push_failed_total",
+			Help: "Push notifications FCM did not accept: invalid_token (the device was removed), retryable, permanent.",
+		}, []string{"reason"}),
+		PushSkipped: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "marpokat_push_skipped_total",
+			Help: "Messages or recipients that got no push, by reason: system, stale, no_credentials, online, duplicate.",
+		}, []string{"reason"}),
 	}
-	r.MustRegister(build, m.HTTPRequests, m.HTTPDuration, m.WSConnections, m.WSClosed, m.WSFramesIn, m.WSEventsDelivered)
+	r.MustRegister(build, m.HTTPRequests, m.HTTPDuration, m.WSConnections, m.WSClosed, m.WSFramesIn, m.WSEventsDelivered,
+		m.OutboxPending, m.OutboxPublished, m.OutboxPublishFailures, m.OutboxLag, m.QueueMessages, m.ConsumerHandled,
+		m.PushSent, m.PushFailed, m.PushSkipped)
 	return m
 }
 

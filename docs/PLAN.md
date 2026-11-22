@@ -7,7 +7,7 @@ yang sama dengan tenant lain nanti, tanpa jalan pintas khusus.
 Dokumen ini acuan utama: keputusan arsitektur, tech stack, desain data dan protokol, pekerjaan infra, integrasi Narrativ,
 serta urutan milestone beserta progress tiap item.
 
-- **Status:** M3 berjalan: kode, spec, dan prototipe klien selesai dan teruji (juga dengan dua proses sungguhan); menunggu build Marpokat M3 di dev dan uji dua browser
+- **Status:** M3 selesai (2026-11-22), M4 berjalan: kode, spec, dan test selesai (juga dengan proses sungguhan); menunggu build M4 di dev dan kredensial FCM Narrativ (NV-07)
 - **Dibuat:** 2026-11-22
 - **Target MVP:** chat service yang robust untuk 100–1000 user aktif. DM, group, media, reaction. Belum untuk dijual
 - **Repo terkait:** `marpokat` (monorepo ini), `narrativ-backend`, `narrativ-android`, `narrativ-web-client`, `homelabs-gitops`
@@ -26,8 +26,8 @@ tidak dihapus. Keputusan baru ditambahkan ke bagian 2 dengan nomor berikutnya, d
 | M0        | Fondasi: repo, spec, skema, skeleton Go, CI/CD, deploy dev | ✅ Selesai |
 | M1        | Tenant dan autentikasi                                     | ✅ Selesai |
 | M2        | Messaging inti (DM, group, history, sync, outbox)          | ✅ Selesai |
-| M3        | Realtime gateway (WebSocket, fan-out, typing, read)        | 🟡 Berjalan |
-| M4        | Worker, push notification, retry dan DLQ                   | ⚪ Belum |
+| M3        | Realtime gateway (WebSocket, fan-out, typing, read)        | ✅ Selesai |
+| M4        | Worker, push notification, retry dan DLQ                   | 🟡 Berjalan |
 | M5        | Media dan reaction, edit/hapus pesan                       | ⚪ Belum |
 | M6        | SDK JS + chat di Narrativ web                              | ⚪ Belum |
 | M7        | SDK Android + chat di Narrativ Android                     | ⚪ Belum |
@@ -87,6 +87,13 @@ Legenda: ⚪ belum, 🟡 berjalan, ✅ selesai, ⛔ terblokir
 | D44 | **Rate limit token bucket di Redis (Lua, waktu dari Redis)**: kirim pesan 10 burst lalu 1/detik per user, 500 burst lalu 100/detik per app; 30 frame/detik per koneksi (lokal); maksimal 10 koneksi per user di semua pod. Redis mati: limiter membolehkan (fail open) | Satu user di dua pod tetap satu user. Limiter yang rusak tidak boleh mematikan chat |
 | D45 | **Klien lambat ditutup dengan 1013** saat antrean 256 event penuh; typing kedaluwarsa sendiri di server (6 detik) dan diakhiri saat koneksi putus | Satu klien lambat tidak boleh menahan pod atau memakan memori. Client reconnect + sync |
 | D46 | **Pod hanya ready jika langganan Redis-nya aktif** (`/readyz` memuat `realtime`) | Pod tanpa langganan akan menerima WebSocket yang tidak bisa dilayaninya |
+| D47 | **Relay outbox**: polling 200 ms (D7), batch 100, `FOR UPDATE SKIP LOCKED`, event ditandai terkirim **hanya setelah RabbitMQ mengonfirmasi** (publisher confirm). At-least-once: crash di antara publish dan tanda bisa menerbitkan ulang, consumer yang menanganinya. Relay menunggu (tanpa menyentuh tabel) selama broker tidak terjangkau | Event tidak pernah hilang karena crash atau broker mati; duplikat murah ditangani, kehilangan tidak |
+| D48 | **Topologi RabbitMQ** per work queue: exchange `events` (topic), `retry` (direct), `dlx`; queue kerja, tiga queue retry bertingkat (10 detik, 1 menit, 10 menit; TTL lalu dead letter kembali ke queue kerja), dan `*.dlq`. Pesan baru diakui hanya setelah penggantinya (retry/DLQ) dikonfirmasi broker. **Publisher ikut mendeklarasikan queue kerja** | RabbitMQ membuang pesan yang tidak punya queue terikat, padahal relay sudah menandainya terkirim: tanpa deklarasi oleh publisher, event di start pertama bisa hilang diam-diam. Ditemukan saat meninjau ulang, ada test-nya |
+| D49 | **Penerima push**: member aktif selain pengirim, tidak mute, belum membaca pesan, **tanpa koneksi hidup di perangkat mana pun**, pesan tidak lebih tua dari 10 menit, bukan pesan sistem. Dedup per perangkat di Redis 24 jam | Yang sedang melihat chat tidak perlu dering. Pesan tua setelah backlog hanya membingungkan. Per perangkat supaya retry satu HP yang gagal tidak membunyikan HP lain dua kali |
+| D50 | **FCM lewat HTTP v1 langsung** dengan service account milik tenant (`x/oauth2/jwt`), tanpa Firebase Admin SDK; pesan data-only (`android.priority HIGH`, `webpush Urgency high`, kedaluwarsa 1 jam). Klasifikasi: token tidak valid (404/UNREGISTERED/SENDER_ID_MISMATCH) → perangkat dihapus; 429/5xx/jaringan/401 → retry; selain itu (400 bukan soal token, kredensial rusak) → dilewati tanpa retry | Ringan, mudah diuji dengan Google palsu (token endpoint ikut `token_uri` di JSON). Kegagalan satu perangkat tidak boleh membawa seluruh event ke DLQ |
+| D51 | **Perangkat**: `POST /v1/devices` memindahkan token ke user yang mendaftar terakhir, setiap user menyimpan 10 token terbaru, `DELETE` hanya menyentuh token milik sendiri dan selalu 204 | Ganti akun di satu HP, dan HP lama yang tidak pernah logout tidak menumpuk |
+| D52 | **Metrics**: `marpokat_outbox_pending`, `outbox_published_total`, `outbox_lag_seconds`, `queue_messages{queue}` (termasuk `*.dlq`, dasar alert), `consumer_handled_total{result}`, `push_sent_total`, `push_failed_total{reason}`, `push_skipped_total{reason}` | Alert INF-14: DLQ tidak kosong, outbox pending terus naik |
+| D53 | **Urutan shutdown worker**: job berhenti dulu (consumer berhenti menerima, yang sedang berjalan diselesaikan dan di-ack), baru koneksi RabbitMQ ditutup | Pesan yang sedang diproses saat pod berhenti tidak kembali ke antrean dan tidak diproses dua kali |
 
 ---
 
@@ -394,7 +401,7 @@ lewat FCM memakai kredensial tenant. Payload: `channel_id`, `message_id`, nama p
 | NV-04 | ~~Upsert user saat register/update profil + backfill~~ Diganti D32: upsert saat token dan saat DM dibuka. Hook update profil menyusul bila perlu | narrativ-backend | M2 | [x] | lewat NV-03 dan NV-05 |
 | NV-05 | `POST /api/v1/chat/dm/{userId}`: cek diri sendiri dan blokir (user di sisi blokir dianggap tidak ada), lalu buat atau ambil DM di Marpokat | narrativ-backend | M2 | [x] | narrativ-backend#82 |
 | NV-06 | Saat user memblokir user lain: freeze channel DM keduanya                                                                              | narrativ-backend         | M5         | [ ]    |     |
-| NV-07 | Kredensial FCM project Firebase Narrativ (dev, lalu prod) disimpan di tenant                                                           | marpokat CLI             | M4         | [ ]    |     |
+| NV-07 | Kredensial FCM project Firebase Narrativ (dev, lalu prod) disimpan di tenant: `kubectl -n narrativ-dev get secret <secret firebase> -o jsonpath='{.data.credentials\\.json}' \| base64 -d \| kubectl -n marpokat-dev exec -i deploy/marpokat-api -- marpokat tenant set-fcm --slug narrativ-dev --file -` | marpokat CLI | M4 | [ ] |     |
 | NV-08 | Layar chat web: daftar channel, ruang chat, kirim media, reaction, unread badge, tombol "Kirim pesan" di profil                        | narrativ-web-client      | M6         | [ ]    |     |
 | NV-09 | Layar chat Android (Compose): sama dengan NV-08, plus deep link dari push                                                               | narrativ-android         | M7         | [ ]    |     |
 | NV-10 | Hapus akun Narrativ juga menghapus/anonimkan user di Marpokat                                                                          | narrativ-backend         | M8         | [ ]    |     |
@@ -446,7 +453,7 @@ lewat FCM memakai kredensial tenant. Payload: `channel_id`, `message_id`, nama p
 - [x] Build M2 live di dev (`eadceb835267`) dan narrativ-backend#82 di-merge (`d82154d6ab86`)
 - [x] **Selesai jika:** dua user Narrativ dev bisa DM dan group lewat REST, history dan sync benar, test hijau. Diuji end-to-end di dev dengan dua akun (27 pemeriksaan lolos): buka DM dari dua sisi, kirim dan kirim ulang, unread, history, sync, read, balas, token palsu ditolak, group (buat, ganti nama, izin member, owner pindah saat keluar, group berakhir)
 
-### M3: Realtime 🟡
+### M3: Realtime ✅
 
 - [x] WS endpoint `/v1/ws`: auth di frame pertama (timeout 10 detik → 4001), `protocol_version`, ping/pong, idle 60 detik → 4008, batas frame 64 KB → 1009, token kedaluwarsa menutup koneksi tepat saat `exp` (4004), maksimal 10 koneksi per user di semua pod (4029)
 - [x] Hub per pod: sesi per user (multi device), satu langganan Redis per user yang terkoneksi, event tidak dikirim balik ke koneksi pengirim (D39)
@@ -460,19 +467,23 @@ lewat FCM memakai kredensial tenant. Payload: `channel_id`, `message_id`, nama p
 - [x] INF-07 (timeout ingress 3600 detik, sudah di `apps/marpokat-dev/ingress.yaml`)
 - [x] Prototipe klien web `examples/web-chat` (sekaligus acuan aturan client di spec) dan spec `events.md` / `openapi.yaml` diselaraskan
 - [x] Test (`-race`, 3 kali berulang hijau): autentikasi (13 kasus), pengiriman lintas dua pod, typing dan read, presence (termasuk kedaluwarsa tanpa disconnect), event channel, rate limit, heartbeat, token, batas koneksi, pod hilang, Redis terputus, rate limiter Redis (tepat 10 dari 60 serentak), CORS. Diuji juga dengan dua proses `marpokat api` sungguhan lewat pgbouncer: pesan lintas proses 13 ms, SIGTERM → jeda drain 2 detik → 1012, sync, CORS preflight
-- [ ] Build M3 live di dev
-- [ ] **Selesai jika:** dua browser chat realtime lewat 2 replika pod, kill satu pod lalu chat tetap jalan setelah reconnect + sync. Skenario ini sudah lolos sebagai test otomatis (`TestWebSocketSurvivesAPodGoingAway`) dan dengan proses sungguhan; tinggal diuji di dev dengan dua browser dan `kubectl delete pod`
+- [x] Build M3 live di dev (`f42db1467dc8`)
+- [x] **Selesai jika:** dua browser chat realtime lewat 2 replika pod, kill satu pod lalu chat tetap jalan setelah reconnect + sync. Lolos sebagai test otomatis (`TestWebSocketSurvivesAPodGoingAway`) dan dengan proses sungguhan. Di dev diuji lewat `wss` melalui Cloudflare dengan dua akun: pesan realtime 61 ms, typing, read, presence online/offline, CORS. (`kubectl delete pod` belum dicoba dari laptop karena cluster tidak terjangkau)
 
-### M4: Worker dan push ⚪
+### M4: Worker dan push 🟡
 
-- [ ] Outbox relay (`SKIP LOCKED`, batch, publisher confirm RabbitMQ) + job pembersih outbox
-- [ ] Topologi RabbitMQ: exchange `marpokat.events`, queue `push`, `webhook`, `media`, retry queue bertingkat, DLQ (dideklarasikan otomatis saat start)
-- [ ] Dedup consumer berdasarkan `event_id`
-- [ ] `POST/DELETE /devices`
-- [ ] Consumer push: pilih penerima offline + tidak mute, kirim FCM (Android + Web Push), hapus token invalid
-- [ ] NV-07
-- [ ] Metrics: panjang queue, retry, DLQ, latensi relay
-- [ ] **Selesai jika:** matikan RabbitMQ saat mengirim pesan, nyalakan lagi, push tetap terkirim tanpa duplikat
+- [x] Relay outbox (D47) + pembersih outbox (event terkirim lebih dari 7 hari dihapus, per 5000 baris)
+- [x] Topologi RabbitMQ (D48): exchange, queue kerja `push`, retry bertingkat, DLQ, dideklarasikan otomatis oleh publisher dan consumer. Queue `webhook` dan `media` menyusul bersama consumer-nya (M8, M5): queue tanpa consumer hanya menumpuk
+- [x] Dedup per perangkat (D49) dan consumer yang tahan putusnya broker (menyambung ulang, mendeklarasikan ulang, lanjut)
+- [x] `POST/DELETE /v1/devices` (D51)
+- [x] Consumer push (D49, D50): hanya member offline yang tidak mute dan belum membaca, Android dan Web Push, token tidak valid dihapus
+- [x] Metrics (D52) dan statistik panjang queue
+- [x] Test (`-race`, 3 kali berulang hijau, RabbitMQ/Postgres/Redis sungguhan lewat testcontainers, Google palsu): push ke member offline dengan semua aturan penerima dan isi payload, tanpa kredensial dilewati, token tidak valid dihapus, retry hanya untuk yang gagal (perangkat lain tidak diulang), DLQ setelah retry habis, event yang dipublikasikan sebelum consumer ada tidak hilang, event lama dilewati, event yang sama dua kali dikirim sekali, relay urut dan mencatat kegagalan, pembersih, API perangkat, FCM (kode status → klasifikasi, token akses di-cache dan diganti setelah 401)
+- [x] Skenario inti: RabbitMQ dimatikan (`rabbitmqctl stop_app`) saat chat berjalan, dinyalakan lagi: 3 push terkirim, masing-masing sekali, outbox kosong (`TestPushSurvivesTheBrokerBeingDown`)
+- [x] Diuji dengan proses `api` dan `worker` sungguhan lewat pgbouncer lokal: relay, queue, metrics, backlog lama dilewati sebagai stale
+- [ ] Build M4 live di dev
+- [ ] NV-07: kredensial FCM project Firebase Narrativ dev disimpan di tenant (langkahnya di bawah tabel integrasi)
+- [ ] **Selesai jika:** matikan RabbitMQ saat mengirim pesan, nyalakan lagi, push tetap terkirim tanpa duplikat. Sudah lolos sebagai test otomatis; tinggal uji di dev dengan token perangkat sungguhan
 
 ### M5: Media dan reaction ⚪
 
@@ -559,3 +570,4 @@ kemungkinan untuk semuanya.
 | 2026-11-22 | M2 dikerjakan: D32–D38, channel/pesan/sync/unread, NV-04/05                    |
 | 2026-11-22 | M2 selesai: diuji dengan dua akun di dev                                       |
 | 2026-11-22 | M3 dikerjakan: D39–D46, WebSocket, fan-out Redis, typing, presence, rate limit, CORS |
+| 2026-11-22 | M3 selesai: diuji lewat wss di dev. M4 dikerjakan: D47–D53, relay outbox, RabbitMQ, push FCM, perangkat |
