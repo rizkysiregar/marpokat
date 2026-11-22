@@ -1,4 +1,4 @@
-// Runs @marpokat/core (the built package) against a live Marpokat with two users, like two browsers would.
+// Runs @rizkysiregar/marpokat-core (the built package) against a live Marpokat with two users, like two browsers would.
 // MP_URL=http://localhost:8080 MP_KEY=mpk_... MP_TOKEN_ALICE=... MP_TOKEN_BOB=... MP_CHANNEL=<dm id> node e2e/live.mjs
 import { MarpokatClient } from '../dist/index.js';
 

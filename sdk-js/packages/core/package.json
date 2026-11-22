@@ -1,5 +1,5 @@
 {
-  "name": "@marpokat/core",
+  "name": "@rizkysiregar/marpokat-core",
   "version": "0.1.0",
   "description": "Marpokat chat client for the browser and Node: connection, state, sync, uploads",
   "type": "module",

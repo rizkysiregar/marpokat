@@ -1,12 +1,14 @@
 {
   "name": "marpokat-sdk-js",
   "private": true,
-  "workspaces": ["packages/*"],
+  "workspaces": [
+    "packages/*"
+  ],
   "scripts": {
-    "gen": "npm run gen -w @marpokat/core",
-    "build": "npm run build -w @marpokat/core && npm run build -w @marpokat/react",
-    "test": "npm test -w @marpokat/core && npm test -w @marpokat/react",
-    "typecheck": "npm run typecheck -w @marpokat/core && npm run typecheck -w @marpokat/react"
+    "gen": "npm run gen -w @rizkysiregar/marpokat-core",
+    "build": "npm run build -w @rizkysiregar/marpokat-core && npm run build -w @rizkysiregar/marpokat-react",
+    "test": "npm run build -w @rizkysiregar/marpokat-core && npm test -w @rizkysiregar/marpokat-core && npm test -w @rizkysiregar/marpokat-react",
+    "typecheck": "npm run build -w @rizkysiregar/marpokat-core && npm run typecheck -w @rizkysiregar/marpokat-core && npm run typecheck -w @rizkysiregar/marpokat-react"
   },
   "devDependencies": {
     "typescript": "5.8.3",

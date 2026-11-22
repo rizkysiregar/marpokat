@@ -1,5 +1,5 @@
 {
-  "name": "@marpokat/react",
+  "name": "@rizkysiregar/marpokat-react",
   "version": "0.1.0",
   "description": "React hooks for Marpokat chat",
   "type": "module",
@@ -9,11 +9,11 @@
   "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js", "require": "./dist/index.cjs" } },
   "files": ["dist"],
   "scripts": {
-    "build": "tsup src/index.tsx --format esm,cjs --dts --clean --external react --external @marpokat/core",
+    "build": "tsup src/index.tsx --format esm,cjs --dts --clean --external react --external @rizkysiregar/marpokat-core",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
-  "peerDependencies": { "@marpokat/core": "^0.1.0", "react": ">=18" },
+  "peerDependencies": { "@rizkysiregar/marpokat-core": "^0.1.0", "react": ">=18" },
   "publishConfig": { "registry": "https://npm.pkg.github.com" },
   "repository": { "type": "git", "url": "git+https://github.com/rizkysiregar/marpokat.git", "directory": "sdk-js/packages/react" },
   "license": "UNLICENSED"

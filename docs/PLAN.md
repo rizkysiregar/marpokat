@@ -135,8 +135,8 @@ supaya prepared statement tidak bentrok antar koneksi.
 
 | SDK                | Pilihan                                                                                                        |
 | ------------------ | -------------------------------------------------------------------------------------------------------------- |
-| `@marpokat/core`   | TypeScript strict, tanpa dependency framework. WebSocket native, fetch, IndexedDB (cache, akhir MVP)            |
-| `@marpokat/react`  | Hooks di atas core (`useChannels`, `useMessages`, `useSendMessage`). Cocok dengan Zustand + React Query        |
+| `@rizkysiregar/marpokat-core`   | TypeScript strict, tanpa dependency framework. WebSocket native, fetch, IndexedDB (cache, akhir MVP)            |
+| `@rizkysiregar/marpokat-react`  | Hooks di atas core (`useChannels`, `useMessages`, `useSendMessage`). Cocok dengan Zustand + React Query        |
 | `marpokat-android` | Kotlin, OkHttp WebSocket, Coroutines + `StateFlow`, kotlinx.serialization, Room (cache + antrean kirim)        |
 | Distribusi         | GitHub Packages (npm + Maven), private. Group Maven `com.rizkysiregar.marpokat`                                 |
 
@@ -509,10 +509,10 @@ lewat FCM memakai kredensial tenant. Payload: `channel_id`, `message_id`, nama p
 ### M6: SDK JS + Narrativ web 🟡
 
 - [x] Scaffold `sdk-js` (workspace npm, TypeScript strict, Vitest, tsup), tipe di-generate dari `spec/openapi.yaml`
-- [x] `@marpokat/core`: `MarpokatClient` (`tokenProvider`), reconnect backoff + jitter, ping, refresh token
+- [x] `@rizkysiregar/marpokat-core`: `MarpokatClient` (`tokenProvider`), reconnect backoff + jitter, ping, refresh token
 - [x] State channel dan pesan, antrean pending + retry idempotent (`send/retry/discard`), deteksi celah `rev_seq` → sync
 - [x] Upload attachment (presigned) dengan progress
-- [x] `@marpokat/react`: `useChannels`, `useChannel`, `useMessages`, `useSendMessage`, `useMessageActions`, `useTyping`, `useUnreadCount`
+- [x] `@rizkysiregar/marpokat-react`: `useChannels`, `useChannel`, `useMessages`, `useSendMessage`, `useMessageActions`, `useTyping`, `useUnreadCount`
 - [x] Cache IndexedDB untuk daftar channel dan 50 pesan terakhir per channel
 - [ ] Publish ke GitHub Packages (perlu token `write:packages` dari pemilik repo)
 - [ ] NV-08

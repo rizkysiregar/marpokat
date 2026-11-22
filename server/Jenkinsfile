@@ -35,7 +35,26 @@ pipeline {
             }
         }
 
+        // The repo holds more than the server (sdk-js, docs, examples). Only a change in server/ or spec/ builds an
+        // image. A build with no changes of its own (Build Now, the first build of a job) always runs.
+        stage('Decide') {
+            steps {
+                script {
+                    def paths = []
+                    for (cs in currentBuild.changeSets) {
+                        for (entry in cs.items) {
+                            paths.addAll(entry.affectedPaths)
+                        }
+                    }
+                    def relevant = paths.isEmpty() || paths.any { it.startsWith('server/') || it.startsWith('spec/') }
+                    env.BUILD_SERVER = relevant ? 'true' : 'false'
+                    echo relevant ? 'Server or spec changed (or manual build): building.' : "Only ${paths.size()} other file(s) changed: nothing to build."
+                }
+            }
+        }
+
         stage('Test') {
+            when { environment name: 'BUILD_SERVER', value: 'true' }
             steps {
                 sh '''
                     docker run --rm \\
@@ -51,6 +70,7 @@ pipeline {
         }
 
         stage('Build and Push Image') {
+            when { environment name: 'BUILD_SERVER', value: 'true' }
             steps {
                 withCredentials([
                     usernamePassword(
@@ -79,6 +99,7 @@ pipeline {
         }
 
         stage('Update GitOps Image Tag') {
+            when { environment name: 'BUILD_SERVER', value: 'true' }
             steps {
                 dir('gitops') {
                     deleteDir()

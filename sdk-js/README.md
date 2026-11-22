@@ -2,12 +2,12 @@
 
 | Package | What |
 | ------- | ---- |
-| `@marpokat/core` | Client for browser and Node 22+: WebSocket, reconnect, sync, pending messages, uploads, IndexedDB cache |
-| `@marpokat/react` | Hooks on top of core: `useChannels`, `useChannel`, `useMessages`, `useSendMessage`, `useTyping`, `useUnreadCount` |
+| `@rizkysiregar/marpokat-core` | Client for browser and Node 22+: WebSocket, reconnect, sync, pending messages, uploads, IndexedDB cache |
+| `@rizkysiregar/marpokat-react` | Hooks on top of core: `useChannels`, `useChannel`, `useMessages`, `useSendMessage`, `useTyping`, `useUnreadCount` |
 
 ```ts
-import { MarpokatClient, indexedDbCache } from '@marpokat/core';
-import { MarpokatProvider, useChannels } from '@marpokat/react';
+import { MarpokatClient, indexedDbCache } from '@rizkysiregar/marpokat-core';
+import { MarpokatProvider, useChannels } from '@rizkysiregar/marpokat-react';
 
 const client = new MarpokatClient({
   baseUrl: 'https://api-marpokat.example.com',
@@ -31,5 +31,5 @@ npm run typecheck && npm test && npm run build
 MP_URL=... MP_KEY=... MP_TOKEN_ALICE=... MP_TOKEN_BOB=... MP_CHANNEL=... node packages/core/e2e/live.mjs
 ```
 
-Publishing goes to GitHub Packages (`npm.pkg.github.com`, scope `@marpokat`); log in with a token that has
+Publishing goes to GitHub Packages (`npm.pkg.github.com`, scope `@rizkysiregar`); log in with a token that has
 `write:packages`.

@@ -2,7 +2,7 @@ import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createElement } from 'react';
 import { MarpokatProvider, useChannels, useMessages, useSendMessage, useUnreadCount } from './index';
-import type { MarpokatClient, Snapshot } from '@marpokat/core';
+import type { MarpokatClient, Snapshot } from '@rizkysiregar/marpokat-core';
 
 afterEach(cleanup);
 

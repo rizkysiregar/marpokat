@@ -1,5 +1,5 @@
 import { createContext, createElement, useCallback, useContext, useEffect, useRef, useSyncExternalStore, type ReactNode } from 'react';
-import type { MarpokatClient, Message, PendingMessage, Snapshot, UploadInput, Attachment } from '@marpokat/core';
+import type { MarpokatClient, Message, PendingMessage, Snapshot, UploadInput, Attachment } from '@rizkysiregar/marpokat-core';
 
 const Context = createContext<MarpokatClient | null>(null);
 
@@ -113,4 +113,4 @@ export function useTyping(channelId: string) {
   return { typing: (s.typing[channelId] ?? NONE).filter((u) => u !== me), onInput, stop: useCallback(() => client.typingStop(channelId), [client, channelId]) };
 }
 
-export type { MarpokatClient, Message, PendingMessage, Snapshot } from '@marpokat/core';
+export type { MarpokatClient, Message, PendingMessage, Snapshot } from '@rizkysiregar/marpokat-core';
