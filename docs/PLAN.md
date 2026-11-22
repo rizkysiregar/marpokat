@@ -7,7 +7,7 @@ yang sama dengan tenant lain nanti, tanpa jalan pintas khusus.
 Dokumen ini acuan utama: keputusan arsitektur, tech stack, desain data dan protokol, pekerjaan infra, integrasi Narrativ,
 serta urutan milestone beserta progress tiap item.
 
-- **Status:** M1 berjalan: kode Marpokat dan Narrativ selesai dan teruji; menunggu deploy Marpokat ke dev, secret Narrativ, dan merge narrativ-backend#80
+- **Status:** M1 selesai (2026-11-22): Narrativ dev menerbitkan chat token dan Marpokat dev menerimanya. Berikutnya M2
 - **Dibuat:** 2026-11-22
 - **Target MVP:** chat service yang robust untuk 100–1000 user aktif. DM, group, media, reaction. Belum untuk dijual
 - **Repo terkait:** `marpokat` (monorepo ini), `narrativ-backend`, `narrativ-android`, `narrativ-web-client`, `homelabs-gitops`
@@ -24,7 +24,7 @@ tidak dihapus. Keputusan baru ditambahkan ke bagian 2 dengan nomor berikutnya, d
 | Milestone | Isi                                                        | Status   |
 | --------- | ---------------------------------------------------------- | -------- |
 | M0        | Fondasi: repo, spec, skema, skeleton Go, CI/CD, deploy dev | ✅ Selesai |
-| M1        | Tenant dan autentikasi                                     | 🟡 Berjalan |
+| M1        | Tenant dan autentikasi                                     | ✅ Selesai |
 | M2        | Messaging inti (DM, group, history, sync, outbox)          | ⚪ Belum |
 | M3        | Realtime gateway (WebSocket, fan-out, typing, read)        | ⚪ Belum |
 | M4        | Worker, push notification, retry dan DLQ                   | ⚪ Belum |
@@ -374,8 +374,8 @@ lewat FCM memakai kredensial tenant. Payload: `channel_id`, `message_id`, nama p
 | ID    | Item                                                                                                                                   | Lokasi                   | Dibutuhkan | Status | Ref |
 | ----- | -------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ | ---------- | ------ | --- |
 | NV-01 | Tenant `narrativ-dev` dibuat lewat CLI, config `client_can_create_dm: false`, `client_can_create_group: true`                          | marpokat CLI             | M1         | [x]    | 2026-11-22, api key `mpk_3d780ec2…` |
-| NV-02 | `MarpokatClient` di backend (server JWT, upsert user; buat DM/group dan freeze menyusul di M2/M5), config `APP_MARPOKAT_*` di configmap + secret | narrativ-backend | M1 | [ ] | narrativ-backend#80, gitops 090b2af |
-| NV-03 | `POST /api/v1/chat/token`: upsert user lalu user token Marpokat + api key + base URL. Contract test jjwt ↔ Go lolos                     | narrativ-backend         | M1         | [ ]    | narrativ-backend#80 |
+| NV-02 | `MarpokatClient` di backend (server JWT, upsert user; buat DM/group dan freeze menyusul di M2/M5), config `APP_MARPOKAT_*` di configmap + secret | narrativ-backend | M1 | [x] | narrativ-backend#80, gitops 090b2af |
+| NV-03 | `POST /api/v1/chat/token`: upsert user lalu user token Marpokat + api key + base URL. Contract test jjwt ↔ Go lolos                     | narrativ-backend         | M1         | [x]    | narrativ-backend#80 |
 | NV-04 | Upsert user ke Marpokat saat register dan update profil (async lewat RabbitMQ Narrativ), plus backfill sekali untuk user lama          | narrativ-backend         | M2         | [ ]    |     |
 | NV-05 | `POST /api/v1/chat/dm/{userId}`: cek blokir/privasi, lalu buat atau ambil DM di Marpokat                                               | narrativ-backend         | M2         | [ ]    |     |
 | NV-06 | Saat user memblokir user lain: freeze channel DM keduanya                                                                              | narrativ-backend         | M5         | [ ]    |     |
@@ -406,17 +406,17 @@ lewat FCM memakai kredensial tenant. Payload: `channel_id`, `message_id`, nama p
 - [x] Jenkinsfile (INF-10), gitops `apps/marpokat-dev` (INF-06), Argo Application (INF-11). Catatan: Job migrate awalnya PreSync, gagal `CreateContainerConfigError` karena ConfigMap belum ada saat sync pertama; diganti hook Sync dengan sync-wave
 - [x] **Selesai jika:** `https://api-dev-marpokat.rizkysiregar.my.id/healthz` menjawab 200 lewat Cloudflare dan migrasi jalan otomatis (2026-11-22, versi `b93975eec3a5`)
 
-### M1: Tenant dan autentikasi 🟡
+### M1: Tenant dan autentikasi ✅
 
 - [x] Modul `tenant`: model, enkripsi secret (`platform/secretbox`, AES-256-GCM dengan konteks per kolom), config jsonb, cache api key 30 detik (`tenant.Resolver`, juga cache negatif 10 detik)
 - [x] CLI `marpokat tenant create|list|show|rotate-secret|set-config|set-fcm|set-webhook|disable|enable|token`
 - [x] Middleware server auth (`X-Api-Key` + server JWT, maks 5 menit) dan user auth (user JWT + user harus ada), pesan error yang jelas (algoritma, signature, kedaluwarsa)
 - [x] `PUT/DELETE /v1/server/users/{external_id}`, `GET /v1/me`. Hapus user = anonimisasi + hapus device + keluar dari semua channel (satu transaksi)
 - [x] Semua query user lewat sqlc dengan `tenant_id` + integration test (testcontainers, `make test-integration`): lifecycle user, isolasi tenant, kegagalan auth, rotasi secret, tenant nonaktif, CLI
-- [ ] Build M1 (`615b197`) live di dev. Catatan: push ke `main` belum memicu job Jenkins otomatis (perlu webhook atau Poll SCM)
+- [x] Build M1 live di dev (`551135ce7405`). Catatan: push ke `main` tidak memicu Jenkins otomatis, build dijalankan manual (perlu webhook atau Poll SCM)
 - [x] Tenant Narrativ dev (NV-01)
-- [ ] NV-02, NV-03 (narrativ-backend#80 menunggu merge + `APP_MARPOKAT_API_SECRET` di `narrativ-secrets`)
-- [ ] **Selesai jika:** Narrativ dev bisa upsert user dan memberi token, dan token itu bisa memanggil `GET /me`
+- [x] NV-02, NV-03 (narrativ-backend#80)
+- [x] **Selesai jika:** Narrativ dev bisa upsert user dan memberi token, dan token itu bisa memanggil `GET /me`. Diuji end-to-end di dev (login → `POST /chat/token` → `GET /v1/me` 200; api key salah → 401)
 
 ### M2: Messaging inti ⚪
 
@@ -532,3 +532,4 @@ kemungkinan untuk semuanya.
 | 2026-11-22 | Dokumen dibuat: keputusan D1–D21, tech stack, desain, infra, milestone M0–M8   |
 | 2026-11-22 | M0 dimulai: D22–D26 ditambahkan, progress M0, INF-06/07/10                     |
 | 2026-11-22 | M0 selesai: infra VM dev, repo, Jenkins, Argo CD; dev live                     |
+| 2026-11-22 | M1 selesai: tenant, auth, user API; integrasi Narrativ dev teruji end-to-end   |
