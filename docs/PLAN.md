@@ -408,7 +408,7 @@ lewat FCM memakai kredensial tenant. Payload: `channel_id`, `message_id`, nama p
 | NV-03 | `POST /api/v1/chat/token`: upsert user lalu user token Marpokat + api key + base URL. Contract test jjwt ↔ Go lolos                     | narrativ-backend         | M1         | [x]    | narrativ-backend#80 |
 | NV-04 | ~~Upsert user saat register/update profil + backfill~~ Diganti D32: upsert saat token dan saat DM dibuka. Hook update profil menyusul bila perlu | narrativ-backend | M2 | [x] | lewat NV-03 dan NV-05 |
 | NV-05 | `POST /api/v1/chat/dm/{userId}`: cek diri sendiri dan blokir (user di sisi blokir dianggap tidak ada), lalu buat atau ambil DM di Marpokat | narrativ-backend | M2 | [x] | narrativ-backend#82 |
-| NV-06 | Saat user memblokir user lain: freeze channel DM keduanya                                                                              | narrativ-backend         | M5         | [ ]    |     |
+| NV-06 | Saat user memblokir user lain: freeze channel DM keduanya                                                                              | narrativ-backend         | M5         | [x]    | narrativ-backend#83 |
 | NV-07 | Kredensial FCM project Firebase Narrativ (dev, lalu prod) disimpan di tenant: `kubectl -n narrativ-dev get secret narrativ-firebase-dev -o jsonpath='{.data.credentials\.json}' \| base64 -d \| kubectl -n marpokat-dev exec -i deploy/marpokat-api -- marpokat tenant set-fcm --slug narrativ-dev --file -` | marpokat CLI | M4 | [ ] |     |
 | NV-08 | Layar chat web: daftar channel, ruang chat, kirim media, reaction, unread badge, tombol "Kirim pesan" di profil                        | narrativ-web-client      | M6         | [ ]    |     |
 | NV-09 | Layar chat Android (Compose): sama dengan NV-08, plus deep link dari push                                                               | narrativ-android         | M7         | [ ]    |     |
@@ -503,7 +503,7 @@ lewat FCM memakai kredensial tenant. Payload: `channel_id`, `message_id`, nama p
 - [x] Edit dan hapus pesan (pengirim; owner/admin group boleh hapus), event `message.updated/deleted`
 - [x] Reply (`reply_to_id`) dengan cuplikan pesan asal
 - [x] Job pembersih attachment yang tidak pernah dipakai (grace 24 jam) dan milik pesan terhapus
-- [ ] NV-06: endpoint `GET /v1/server/channels/dm` sudah ada; tinggal sisi narrativ-backend
+- [x] NV-06: `GET /v1/server/channels/dm` di Marpokat + freeze/unfreeze di narrativ-backend (PR #83, merge setelah M5 jalan di dev)
 - [x] **Selesai jika:** foto + reaction + edit + hapus + reply + putus koneksi dari klien referensi (`examples/web-chat/test.mjs`, dua klien) tampil sama di keduanya setelah reconnect + sync. Lolos terhadap api + worker + MinIO sungguhan; tinggal uji di dev
 
 ### M6: SDK JS + Narrativ web ⚪
