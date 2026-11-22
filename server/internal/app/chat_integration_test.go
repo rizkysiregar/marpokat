@@ -33,6 +33,28 @@ func TestDirectMessages(t *testing.T) {
 	if r = e.asServer(tt, "POST", "/v1/server/channels/dm", map[string]any{"user_a": "alice", "user_b": "nobody"}); r.status != 404 {
 		t.Fatalf("dm with an unknown user: %d %v", r.status, r.body)
 	}
+	// the backend can look a DM up without creating one
+	find := func(a, b string) response {
+		return e.asServer(tt, "GET", "/v1/server/channels/dm?user_a="+a+"&user_b="+b, nil)
+	}
+	if r := find("bob", "alice"); r.status != 200 || str(r.at("id")) != ch || num(r.at("member_count")) != 2 {
+		t.Fatalf("find an existing dm: %d %v", r.status, r.body)
+	}
+	if r := find("alice", "carol"); r.status != 404 {
+		t.Fatalf("find a dm that does not exist: %d %v", r.status, r.body)
+	}
+	if r := find("alice", "ghost"); r.status != 404 {
+		t.Fatalf("find a dm with an unknown user: %d", r.status)
+	}
+	if r := find("alice", "alice"); r.status != 400 {
+		t.Fatalf("find a dm with yourself: %d", r.status)
+	}
+	if r := e.asServer(tt, "GET", "/v1/server/channels/dm?user_a=alice&user_b=carol", nil); count(r.at("channels")) != 0 {
+		t.Fatalf("looking must not create: %v", r.body)
+	}
+	if again := find("alice", "carol"); again.status != 404 {
+		t.Fatalf("a DM appeared by looking for it: %d", again.status)
+	}
 	// this tenant does not let clients create DMs (PLAN D11)
 	if r = e.asUser(tt, "alice", "POST", "/v1/channels", map[string]any{"type": "dm", "user_id": "carol"}); r.status != 403 {
 		t.Fatalf("client created a dm: %d %v", r.status, r.body)

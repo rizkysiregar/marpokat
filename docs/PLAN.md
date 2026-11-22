@@ -28,7 +28,7 @@ tidak dihapus. Keputusan baru ditambahkan ke bagian 2 dengan nomor berikutnya, d
 | M2        | Messaging inti (DM, group, history, sync, outbox)          | ✅ Selesai |
 | M3        | Realtime gateway (WebSocket, fan-out, typing, read)        | ✅ Selesai |
 | M4        | Worker, push notification, retry dan DLQ                   | 🟡 Berjalan |
-| M5        | Media dan reaction, edit/hapus pesan                       | ⚪ Belum |
+| M5        | Media dan reaction, edit/hapus pesan                       | 🟡 Kode selesai, belum diuji di dev |
 | M6        | SDK JS + chat di Narrativ web                              | ⚪ Belum |
 | M7        | SDK Android + chat di Narrativ Android                     | ⚪ Belum |
 | M8        | Hardening dan launch prod                                  | ⚪ Belum |
@@ -94,6 +94,14 @@ Legenda: ⚪ belum, 🟡 berjalan, ✅ selesai, ⛔ terblokir
 | D51 | **Perangkat**: `POST /v1/devices` memindahkan token ke user yang mendaftar terakhir, setiap user menyimpan 10 token terbaru, `DELETE` hanya menyentuh token milik sendiri dan selalu 204 | Ganti akun di satu HP, dan HP lama yang tidak pernah logout tidak menumpuk |
 | D52 | **Metrics**: `marpokat_outbox_pending`, `outbox_published_total`, `outbox_lag_seconds`, `queue_messages{queue}` (termasuk `*.dlq`, dasar alert), `consumer_handled_total{result}`, `push_sent_total`, `push_failed_total{reason}`, `push_skipped_total{reason}` | Alert INF-14: DLQ tidak kosong, outbox pending terus naik |
 | D53 | **Urutan shutdown worker**: job berhenti dulu (consumer berhenti menerima, yang sedang berjalan diselesaikan dan di-ack), baru koneksi RabbitMQ ditutup | Pesan yang sedang diproses saat pod berhenti tidak kembali ke antrean dan tidak diproses dua kali |
+| D54 | **Lampiran**: `message_attachments` (UNIQUE `attachment_id`: satu upload hanya untuk satu pesan), status pending/processing/ready/failed, maks 10 per pesan. Upload via presigned PUT yang menandatangani Content-Type; ukuran diperiksa di `complete` lewat Stat (tidak cocok → failed + objek dihapus) | File tidak lewat API; batas ukuran tetap ditegakkan tanpa proxy |
+| D55 | **Jenis dari mime**: image/jpeg,png,webp,gif,heic,heif; video/mp4,quicktime,webm,3gpp; selain itu (SVG termasuk) adalah `file` yang hanya diunduh dengan `content-disposition: attachment`. Batas 10/50/25 MB, gambar maks 64 juta piksel (dicek dari header sebelum decode) | SVG bisa memuat skrip; gambar raksasa kecil di disk bisa menghabiskan memori |
+| D56 | **Thumbnail di worker**: gambar diproses di Go (EXIF auto-orient, JPEG 640px, blurhash 4x3); video lewat ffmpeg statis saja (poster + durasi dibaca dari banner ffmpeg, tanpa ffprobe agar image 186 MB, bukan 340 MB). Tanpa ffmpeg video disimpan tanpa poster; HEIC tanpa thumbnail | Satu image untuk api dan worker |
+| D57 | **Pesan boleh dikirim saat lampiran masih `processing`**; saat siap pesan mendapat `rev_seq` baru dan `message.updated` (juga di channel yang dibekukan) | Pengirim tidak menunggu thumbnail |
+| D58 | **Hapus pesan = tombstone**: teks, lampiran, dan reaction hilang, `seq` dan pengirim tetap, `rev_seq` baru agar sync membawanya; file dihapus pembersih setelah masa tenggang | Klien yang offline tetap tahu pesan itu dihapus |
+| D59 | **Reaction**: emoji string 1-64 byte tanpa spasi/kontrol, maks 10 berbeda per user per pesan, idempoten (tidak mengubah `rev_seq`); `mine` dihitung per penerima di event dan respons | Aplikasi boleh punya emoji sendiri tanpa daftar tetap |
+| D60 | **Reply**: cuplikan 200 karakter diambil saat dibaca (ikut edit/hapus pesan asal); membalas pesan yang baru dihapus diperbolehkan | Cuplikan tidak basi |
+| D61 | **`GET /v1/server/channels/dm`** mencari DM tanpa membuatnya | Membekukan DM saat blokir tidak boleh memulai percakapan |
 
 ---
 
@@ -485,18 +493,18 @@ lewat FCM memakai kredensial tenant. Payload: `channel_id`, `message_id`, nama p
 - [ ] NV-07: kredensial FCM project Firebase Narrativ dev disimpan di tenant (langkahnya di bawah tabel integrasi)
 - [ ] **Selesai jika:** matikan RabbitMQ saat mengirim pesan, nyalakan lagi, push tetap terkirim tanpa duplikat. Sudah lolos sebagai test otomatis; tinggal uji di dev dengan token perangkat sungguhan
 
-### M5: Media dan reaction ⚪
+### M5: Media dan reaction 🟡
 
-- [ ] INF-04
-- [ ] `POST /attachments` + `complete`, validasi mime/ukuran, presigned PUT/GET
-- [ ] Consumer media: thumbnail gambar/video + blurhash, status `ready`, event `message.updated`
-- [ ] Pesan dengan attachment, validasi attachment milik pengirim dan berstatus `ready`
-- [ ] Reaction: tambah/hapus, `reaction_counts`, event `reaction.added/removed`
-- [ ] Edit dan hapus pesan (pengirim; admin group boleh hapus), event `message.updated/deleted`
-- [ ] Reply (`reply_to_id`) dengan cuplikan pesan asal
-- [ ] Job pembersih attachment `pending` yang tidak pernah dipakai
-- [ ] NV-06
-- [ ] **Selesai jika:** kirim foto + reaction + edit dari prototipe web, semuanya tampil benar setelah reconnect + sync
+- [ ] INF-04: bucket dan user selesai; sisa aturan CORS bucket untuk upload langsung dari browser (PUT presigned lintas origin)
+- [x] `POST /attachments` + `complete`, validasi mime/ukuran, presigned PUT/GET
+- [x] Consumer media: thumbnail gambar/video + blurhash, status `ready`, event `message.updated`
+- [x] Pesan dengan attachment: milik pengirim, sudah di-`complete` (`processing` boleh, `ready` menyusul lewat `message.updated`)
+- [x] Reaction: tambah/hapus, `reaction_counts`, event `reaction.added/removed` dengan `mine` per penerima
+- [x] Edit dan hapus pesan (pengirim; owner/admin group boleh hapus), event `message.updated/deleted`
+- [x] Reply (`reply_to_id`) dengan cuplikan pesan asal
+- [x] Job pembersih attachment yang tidak pernah dipakai (grace 24 jam) dan milik pesan terhapus
+- [ ] NV-06: endpoint `GET /v1/server/channels/dm` sudah ada; tinggal sisi narrativ-backend
+- [x] **Selesai jika:** foto + reaction + edit + hapus + reply + putus koneksi dari klien referensi (`examples/web-chat/test.mjs`, dua klien) tampil sama di keduanya setelah reconnect + sync. Lolos terhadap api + worker + MinIO sungguhan; tinggal uji di dev
 
 ### M6: SDK JS + Narrativ web ⚪
 

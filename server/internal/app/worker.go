@@ -6,6 +6,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/rizkysiregar/marpokat/server/internal/media"
 	"github.com/rizkysiregar/marpokat/server/internal/platform/config"
 	"github.com/rizkysiregar/marpokat/server/internal/platform/db"
 	"github.com/rizkysiregar/marpokat/server/internal/platform/health"
@@ -13,6 +14,7 @@ import (
 	"github.com/rizkysiregar/marpokat/server/internal/platform/metrics"
 	"github.com/rizkysiregar/marpokat/server/internal/platform/rabbitmq"
 	"github.com/rizkysiregar/marpokat/server/internal/platform/redisx"
+	"github.com/rizkysiregar/marpokat/server/internal/platform/storage"
 )
 
 type workerConfig struct {
@@ -20,7 +22,10 @@ type workerConfig struct {
 	Postgres config.Postgres
 	Redis    config.Redis
 	RabbitMQ config.RabbitMQ
+	MinIO    config.MinIO
 	Secrets  config.Secrets
+	// The binary that makes the poster of a video; unset, videos are kept without one.
+	FFmpeg string `env:"FFMPEG_PATH"`
 }
 
 // RunWorker runs the background jobs (outbox relay, push) until ctx is cancelled.
@@ -54,9 +59,16 @@ func RunWorker(ctx context.Context, info Info) error {
 	reg.Add("postgres", pool.Ping)
 	reg.Add("redis", func(ctx context.Context) error { return rdb.Ping(ctx).Err() })
 	reg.Add("rabbitmq", mq.Check)
+	files, err := storage.Open(ctx, cfg.MinIO)
+	if err != nil {
+		return err
+	}
+	reg.Add("storage", files.Check)
 	m := metrics.New(info.Version)
 	mgmt := httpx.NewServer(cfg.Server.ManagementAddr, managementHandler(reg, m))
-	worker := NewWorker(WorkerDeps{Pool: pool, Redis: rdb, Rabbit: mq, Box: box, Log: log, Metrics: m, Options: DefaultWorkerOptions()})
+	opts := DefaultWorkerOptions()
+	opts.FFmpeg = cfg.FFmpeg
+	worker := NewWorker(WorkerDeps{Pool: pool, Redis: rdb, Rabbit: mq, Storage: media.NewStorage(files), Box: box, Log: log, Metrics: m, Options: opts})
 
 	log.Info("worker starting", "management_addr", cfg.Server.ManagementAddr)
 	stopCtx, cancel := drainThenStop(ctx, reg, cfg.Server.ShutdownDelay, log)

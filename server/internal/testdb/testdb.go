@@ -17,6 +17,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/minio/minio-go/v7"
+	"github.com/minio/minio-go/v7/pkg/credentials"
 	"github.com/testcontainers/testcontainers-go"
 	tcpostgres "github.com/testcontainers/testcontainers-go/modules/postgres"
 	"github.com/testcontainers/testcontainers-go/wait"
@@ -38,6 +40,10 @@ var (
 	rabbitConf config.RabbitMQ
 	rabbitCtr  testcontainers.Container
 	rabbitErr  error
+	minioOnce  sync.Once
+	minioConf  config.MinIO
+	minioCtr   testcontainers.Container
+	minioErr   error
 )
 
 // Main is called from TestMain: it starts the container, migrates, runs the tests and cleans up.
@@ -91,7 +97,7 @@ func run(m *testing.M) int {
 	defer pool.Close()
 
 	defer func() {
-		for _, c := range []testcontainers.Container{redisCtr, rabbitCtr} {
+		for _, c := range []testcontainers.Container{redisCtr, rabbitCtr, minioCtr} {
 			if c != nil {
 				_ = testcontainers.TerminateContainer(c)
 			}
@@ -194,4 +200,58 @@ func Pool(t *testing.T) *pgxpool.Pool {
 		t.Fatal("testdb: Main was not called from TestMain")
 	}
 	return pool
+}
+
+// MinIO returns the settings of a MinIO container with an empty bucket, starting it on first use. Tests stay apart
+// through the tenant id every object key starts with.
+func MinIO(t *testing.T) config.MinIO {
+	t.Helper()
+	minioOnce.Do(func() {
+		ctx := context.Background()
+		const user, pass, bucket = "marpokat", "marpokat-secret", "marpokat-test"
+		minioCtr, minioErr = testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+			ContainerRequest: testcontainers.ContainerRequest{
+				// MinIO no longer publishes images on Docker Hub or quay; this is a build of the same server
+				Image:        "cgr.dev/chainguard/minio:latest",
+				Cmd:          []string{"server", "/data"},
+				ExposedPorts: []string{"9000/tcp"},
+				Env:          map[string]string{"MINIO_ROOT_USER": user, "MINIO_ROOT_PASSWORD": pass},
+				WaitingFor:   wait.ForHTTP("/minio/health/ready").WithPort("9000/tcp").WithStartupTimeout(90 * time.Second),
+			},
+			Started: true,
+		})
+		if minioErr != nil {
+			return
+		}
+		host, err := minioCtr.Host(ctx)
+		if err != nil {
+			minioErr = err
+			return
+		}
+		port, err := minioCtr.MappedPort(ctx, "9000/tcp")
+		if err != nil {
+			minioErr = err
+			return
+		}
+		conf := config.MinIO{Endpoint: fmt.Sprintf("http://%s:%d", host, port.Num()), AccessKey: user, SecretKey: pass, Bucket: bucket, Region: "us-east-1"}
+		host2, secure, err := conf.HostAndTLS()
+		if err != nil {
+			minioErr = err
+			return
+		}
+		client, err := minio.New(host2, &minio.Options{Creds: credentials.NewStaticV4(user, pass, ""), Secure: secure, Region: conf.Region})
+		if err != nil {
+			minioErr = err
+			return
+		}
+		if err := client.MakeBucket(ctx, bucket, minio.MakeBucketOptions{Region: conf.Region}); err != nil {
+			minioErr = err
+			return
+		}
+		minioConf = conf
+	})
+	if minioErr != nil {
+		t.Fatalf("testdb: minio container: %v", minioErr)
+	}
+	return minioConf
 }

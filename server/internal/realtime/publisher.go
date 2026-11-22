@@ -141,6 +141,86 @@ func (p *Publisher) MessageCreated(ctx context.Context, tenantID uuid.UUID, msg 
 	p.publish(ctx, tenantID, ids, EvMessageNew, map[string]any{"channel_id": msg.ChannelID, "rev_seq": msg.RevSeq, "message": msg}, origin)
 }
 
+// reactors returns who reacted with what on a message, for telling each receiver which reactions are their own.
+func (p *Publisher) reactors(ctx context.Context, messageID uuid.UUID) map[uuid.UUID][]string {
+	rows, err := p.q.ListReactionsOfMessage(ctx, messageID)
+	if err != nil {
+		p.log.Warn("cannot load reactions for an event", "message_id", messageID, "error", err)
+		return nil
+	}
+	out := make(map[uuid.UUID][]string)
+	for _, r := range rows {
+		out[r.UserID] = append(out[r.UserID], r.Emoji)
+	}
+	return out
+}
+
+func mineOf(byUser map[uuid.UUID][]string, id uuid.UUID) []string {
+	if mine := byUser[id]; mine != nil {
+		return mine
+	}
+	return []string{}
+}
+
+// MessageUpdated tells the members that a message changed (it was edited, or an attachment became ready). The
+// reactions that are the receiver's own differ per receiver, so a message that has reactions is sent to each member
+// separately; one without is sent to all of them at once.
+func (p *Publisher) MessageUpdated(ctx context.Context, tenantID uuid.UUID, msg message.Message) {
+	ids, err := p.members(ctx, tenantID, msg.ChannelID)
+	if err != nil {
+		p.log.Warn("message.updated not published", "error", err)
+		return
+	}
+	data := func(m message.Message) map[string]any {
+		return map[string]any{"channel_id": m.ChannelID, "rev_seq": m.RevSeq, "message": m}
+	}
+	if len(msg.Reactions.Counts) == 0 {
+		p.publish(ctx, tenantID, ids, EvMessageUpdated, data(msg), "")
+		return
+	}
+	byUser := p.reactors(ctx, msg.ID)
+	for _, id := range ids {
+		m := msg
+		m.Reactions.Mine = mineOf(byUser, id)
+		p.publish(ctx, tenantID, []uuid.UUID{id}, EvMessageUpdated, data(m), "")
+	}
+}
+
+// MessageDeleted tells the members that a message is now a tombstone.
+func (p *Publisher) MessageDeleted(ctx context.Context, tenantID uuid.UUID, msg message.Message) {
+	ids, err := p.members(ctx, tenantID, msg.ChannelID)
+	if err != nil {
+		p.log.Warn("message.deleted not published", "error", err)
+		return
+	}
+	p.publish(ctx, tenantID, ids, EvMessageDeleted, map[string]any{"channel_id": msg.ChannelID, "rev_seq": msg.RevSeq, "message": msg}, "")
+}
+
+// ReactionChanged tells the members that someone reacted or took a reaction back, with the summary as each of them
+// sees it.
+func (p *Publisher) ReactionChanged(ctx context.Context, tenantID uuid.UUID, msg message.Message, userID uuid.UUID, emoji string, added bool) {
+	ext, ok := p.externalID(ctx, tenantID, userID)
+	if !ok {
+		return
+	}
+	ids, err := p.members(ctx, tenantID, msg.ChannelID)
+	if err != nil {
+		p.log.Warn("reaction event not published", "error", err)
+		return
+	}
+	typ := EvReactionRemoved
+	if added {
+		typ = EvReactionAdded
+	}
+	byUser := p.reactors(ctx, msg.ID)
+	for _, id := range ids {
+		p.publish(ctx, tenantID, []uuid.UUID{id}, typ, map[string]any{
+			"channel_id": msg.ChannelID, "rev_seq": msg.RevSeq, "message_id": msg.ID, "user_id": ext, "emoji": emoji,
+			"reactions": message.Reactions{Counts: msg.Reactions.Counts, Mine: mineOf(byUser, id)},
+		}, "")
+	}
+}
+
 func (p *Publisher) ReadUpdated(ctx context.Context, tenantID, channelID, userID uuid.UUID, lastReadSeq int64, origin string) {
 	ext, ok := p.externalID(ctx, tenantID, userID)
 	if !ok {

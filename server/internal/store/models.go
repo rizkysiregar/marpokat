@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgtype"
 )
 
 type Attachment struct {
@@ -19,9 +18,9 @@ type Attachment struct {
 	Mime       string
 	Size       int64
 	FileName   *string
-	Width      pgtype.Int4
-	Height     pgtype.Int4
-	DurationMs pgtype.Int4
+	Width      *int32
+	Height     *int32
+	DurationMs *int32
 	ThumbKey   *string
 	Blurhash   *string
 	Status     string
@@ -75,7 +74,6 @@ type Message struct {
 	ClientMsgID    *string
 	Type           string
 	Text           *string
-	Attachments    string
 	ReplyToID      uuid.NullUUID
 	ReactionCounts string
 	Metadata       string
@@ -83,6 +81,12 @@ type Message struct {
 	EditedAt       *time.Time
 	DeletedAt      *time.Time
 	CreatedAt      time.Time
+}
+
+type MessageAttachment struct {
+	MessageID    uuid.UUID
+	AttachmentID uuid.UUID
+	Position     int16
 }
 
 type MessageDetail struct {
@@ -94,7 +98,6 @@ type MessageDetail struct {
 	ClientMsgID      *string
 	Type             string
 	Text             *string
-	Attachments      string
 	ReplyToID        uuid.NullUUID
 	ReactionCounts   string
 	Metadata         string

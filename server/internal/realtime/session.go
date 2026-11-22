@@ -343,17 +343,14 @@ func (s *Session) onSend(f inFrame) {
 		s.fail(f.ID, httpx.ErrNotFound("channel not found"))
 		return
 	}
-	if len(d.AttachmentIDs) > 0 {
-		s.fail(f.ID, httpx.FieldErrors{"attachment_ids": "attachments are not supported yet"})
-		return
-	}
-	if len(d.ReplyToID) > 0 && string(d.ReplyToID) != "null" {
-		s.fail(f.ID, httpx.FieldErrors{"reply_to_id": "replies are not supported yet"})
+	attachmentIDs, replyTo, err := message.ParseSendRefs(d.AttachmentIDs, d.ReplyToID)
+	if err != nil {
+		s.fail(f.ID, err)
 		return
 	}
 	msg, _, err := s.h.msgs.Send(s.ctx, message.SendInput{
 		TenantID: s.tenant.ID, ChannelID: channelID, SenderID: s.userID,
-		ClientMsgID: d.ClientMsgID, Text: d.Text, Origin: s.id,
+		ClientMsgID: d.ClientMsgID, Text: d.Text, AttachmentIDs: attachmentIDs, ReplyToID: replyTo, Origin: s.id,
 	})
 	if err != nil {
 		s.fail(f.ID, err)

@@ -12,6 +12,62 @@ import (
 	"github.com/google/uuid"
 )
 
+const adjustReactionCount = `-- name: AdjustReactionCount :exec
+UPDATE messages
+SET reaction_counts = CASE
+        WHEN coalesce((reaction_counts ->> $1::text)::int, 0) + $2::int <= 0
+            THEN reaction_counts - $1::text
+        ELSE jsonb_set(reaction_counts, ARRAY[$1::text],
+                       to_jsonb(coalesce((reaction_counts ->> $1::text)::int, 0) + $2::int))
+    END,
+    rev_seq = $3
+WHERE id = $4 AND tenant_id = $5 AND deleted_at IS NULL
+`
+
+type AdjustReactionCountParams struct {
+	Emoji    string
+	Delta    int32
+	RevSeq   int64
+	ID       uuid.UUID
+	TenantID uuid.UUID
+}
+
+// Keeps the per emoji counts on the message in step with message_reactions. One UPDATE reads and writes the count, so
+// two users reacting at the same moment cannot lose one.
+func (q *Queries) AdjustReactionCount(ctx context.Context, arg AdjustReactionCountParams) error {
+	_, err := q.db.Exec(ctx, adjustReactionCount,
+		arg.Emoji,
+		arg.Delta,
+		arg.RevSeq,
+		arg.ID,
+		arg.TenantID,
+	)
+	return err
+}
+
+const bumpChannelRev = `-- name: BumpChannelRev :one
+UPDATE channels
+SET last_seq = last_seq + 1
+WHERE id = $1 AND tenant_id = $2 AND deleted_at IS NULL
+  AND (NOT $3::boolean OR frozen_at IS NULL)
+RETURNING last_seq
+`
+
+type BumpChannelRevParams struct {
+	ID          uuid.UUID
+	TenantID    uuid.UUID
+	CheckFrozen bool
+}
+
+// Takes the next value of the channel counter for a change to an existing message (edit, delete, reaction, an attachment
+// that became ready). It locks the channel row like BumpChannelSeq does, so changes commit in counter order.
+func (q *Queries) BumpChannelRev(ctx context.Context, arg BumpChannelRevParams) (int64, error) {
+	row := q.db.QueryRow(ctx, bumpChannelRev, arg.ID, arg.TenantID, arg.CheckFrozen)
+	var last_seq int64
+	err := row.Scan(&last_seq)
+	return last_seq, err
+}
+
 const bumpChannelSeq = `-- name: BumpChannelSeq :one
 UPDATE channels
 SET last_seq = last_seq + 1, last_message_seq = last_seq + 1, last_message_at = now()
@@ -41,8 +97,51 @@ func (q *Queries) BumpChannelSeq(ctx context.Context, arg BumpChannelSeqParams) 
 	return i, err
 }
 
+const countUserReactions = `-- name: CountUserReactions :one
+SELECT count(*)::int FROM message_reactions WHERE message_id = $1 AND user_id = $2
+`
+
+type CountUserReactionsParams struct {
+	MessageID uuid.UUID
+	UserID    uuid.UUID
+}
+
+func (q *Queries) CountUserReactions(ctx context.Context, arg CountUserReactionsParams) (int32, error) {
+	row := q.db.QueryRow(ctx, countUserReactions, arg.MessageID, arg.UserID)
+	var column_1 int32
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
+const deleteMessageReactions = `-- name: DeleteMessageReactions :exec
+DELETE FROM message_reactions WHERE message_id = $1
+`
+
+func (q *Queries) DeleteMessageReactions(ctx context.Context, messageID uuid.UUID) error {
+	_, err := q.db.Exec(ctx, deleteMessageReactions, messageID)
+	return err
+}
+
+const deleteReaction = `-- name: DeleteReaction :execrows
+DELETE FROM message_reactions WHERE message_id = $1 AND user_id = $2 AND emoji = $3
+`
+
+type DeleteReactionParams struct {
+	MessageID uuid.UUID
+	UserID    uuid.UUID
+	Emoji     string
+}
+
+func (q *Queries) DeleteReaction(ctx context.Context, arg DeleteReactionParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteReaction, arg.MessageID, arg.UserID, arg.Emoji)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const getMessageByClientID = `-- name: GetMessageByClientID :one
-SELECT channel_id, seq, id, tenant_id, sender_id, client_msg_id, type, text, attachments, reply_to_id, reaction_counts, metadata, rev_seq, edited_at, deleted_at, created_at, sender_external_id, sender_name, sender_avatar_url, sender_metadata, sender_deleted_at FROM message_details
+SELECT channel_id, seq, id, tenant_id, sender_id, client_msg_id, type, text, reply_to_id, reaction_counts, metadata, rev_seq, edited_at, deleted_at, created_at, sender_external_id, sender_name, sender_avatar_url, sender_metadata, sender_deleted_at FROM message_details
 WHERE channel_id = $1 AND tenant_id = $2 AND sender_id = $3 AND client_msg_id = $4
 `
 
@@ -70,7 +169,43 @@ func (q *Queries) GetMessageByClientID(ctx context.Context, arg GetMessageByClie
 		&i.ClientMsgID,
 		&i.Type,
 		&i.Text,
-		&i.Attachments,
+		&i.ReplyToID,
+		&i.ReactionCounts,
+		&i.Metadata,
+		&i.RevSeq,
+		&i.EditedAt,
+		&i.DeletedAt,
+		&i.CreatedAt,
+		&i.SenderExternalID,
+		&i.SenderName,
+		&i.SenderAvatarUrl,
+		&i.SenderMetadata,
+		&i.SenderDeletedAt,
+	)
+	return i, err
+}
+
+const getMessageByID = `-- name: GetMessageByID :one
+SELECT channel_id, seq, id, tenant_id, sender_id, client_msg_id, type, text, reply_to_id, reaction_counts, metadata, rev_seq, edited_at, deleted_at, created_at, sender_external_id, sender_name, sender_avatar_url, sender_metadata, sender_deleted_at FROM message_details WHERE id = $1 AND tenant_id = $2
+`
+
+type GetMessageByIDParams struct {
+	ID       uuid.UUID
+	TenantID uuid.UUID
+}
+
+func (q *Queries) GetMessageByID(ctx context.Context, arg GetMessageByIDParams) (MessageDetail, error) {
+	row := q.db.QueryRow(ctx, getMessageByID, arg.ID, arg.TenantID)
+	var i MessageDetail
+	err := row.Scan(
+		&i.ChannelID,
+		&i.Seq,
+		&i.ID,
+		&i.TenantID,
+		&i.SenderID,
+		&i.ClientMsgID,
+		&i.Type,
+		&i.Text,
 		&i.ReplyToID,
 		&i.ReactionCounts,
 		&i.Metadata,
@@ -88,7 +223,7 @@ func (q *Queries) GetMessageByClientID(ctx context.Context, arg GetMessageByClie
 }
 
 const getMessageBySeq = `-- name: GetMessageBySeq :one
-SELECT channel_id, seq, id, tenant_id, sender_id, client_msg_id, type, text, attachments, reply_to_id, reaction_counts, metadata, rev_seq, edited_at, deleted_at, created_at, sender_external_id, sender_name, sender_avatar_url, sender_metadata, sender_deleted_at FROM message_details WHERE channel_id = $1 AND tenant_id = $2 AND seq = $3
+SELECT channel_id, seq, id, tenant_id, sender_id, client_msg_id, type, text, reply_to_id, reaction_counts, metadata, rev_seq, edited_at, deleted_at, created_at, sender_external_id, sender_name, sender_avatar_url, sender_metadata, sender_deleted_at FROM message_details WHERE channel_id = $1 AND tenant_id = $2 AND seq = $3
 `
 
 type GetMessageBySeqParams struct {
@@ -109,7 +244,6 @@ func (q *Queries) GetMessageBySeq(ctx context.Context, arg GetMessageBySeqParams
 		&i.ClientMsgID,
 		&i.Type,
 		&i.Text,
-		&i.Attachments,
 		&i.ReplyToID,
 		&i.ReactionCounts,
 		&i.Metadata,
@@ -127,8 +261,8 @@ func (q *Queries) GetMessageBySeq(ctx context.Context, arg GetMessageBySeqParams
 }
 
 const insertMessage = `-- name: InsertMessage :exec
-INSERT INTO messages (channel_id, seq, id, tenant_id, sender_id, client_msg_id, type, text, metadata, rev_seq, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+INSERT INTO messages (channel_id, seq, id, tenant_id, sender_id, client_msg_id, type, text, reply_to_id, metadata, rev_seq, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
 `
 
 type InsertMessageParams struct {
@@ -140,6 +274,7 @@ type InsertMessageParams struct {
 	ClientMsgID *string
 	Type        string
 	Text        *string
+	ReplyToID   uuid.NullUUID
 	Metadata    string
 	RevSeq      int64
 	CreatedAt   time.Time
@@ -155,6 +290,7 @@ func (q *Queries) InsertMessage(ctx context.Context, arg InsertMessageParams) er
 		arg.ClientMsgID,
 		arg.Type,
 		arg.Text,
+		arg.ReplyToID,
 		arg.Metadata,
 		arg.RevSeq,
 		arg.CreatedAt,
@@ -177,8 +313,26 @@ func (q *Queries) InsertOutbox(ctx context.Context, arg InsertOutboxParams) erro
 	return err
 }
 
+const insertReaction = `-- name: InsertReaction :execrows
+INSERT INTO message_reactions (message_id, user_id, emoji) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING
+`
+
+type InsertReactionParams struct {
+	MessageID uuid.UUID
+	UserID    uuid.UUID
+	Emoji     string
+}
+
+func (q *Queries) InsertReaction(ctx context.Context, arg InsertReactionParams) (int64, error) {
+	result, err := q.db.Exec(ctx, insertReaction, arg.MessageID, arg.UserID, arg.Emoji)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const listLastMessages = `-- name: ListLastMessages :many
-SELECT md.channel_id, md.seq, md.id, md.tenant_id, md.sender_id, md.client_msg_id, md.type, md.text, md.attachments, md.reply_to_id, md.reaction_counts, md.metadata, md.rev_seq, md.edited_at, md.deleted_at, md.created_at, md.sender_external_id, md.sender_name, md.sender_avatar_url, md.sender_metadata, md.sender_deleted_at FROM channels c
+SELECT md.channel_id, md.seq, md.id, md.tenant_id, md.sender_id, md.client_msg_id, md.type, md.text, md.reply_to_id, md.reaction_counts, md.metadata, md.rev_seq, md.edited_at, md.deleted_at, md.created_at, md.sender_external_id, md.sender_name, md.sender_avatar_url, md.sender_metadata, md.sender_deleted_at FROM channels c
 JOIN message_details md ON md.channel_id = c.id AND md.seq = c.last_message_seq
 WHERE c.id = ANY(string_to_array($1::text, ',')::uuid[]) AND c.tenant_id = $2
 `
@@ -207,7 +361,6 @@ func (q *Queries) ListLastMessages(ctx context.Context, arg ListLastMessagesPara
 			&i.ClientMsgID,
 			&i.Type,
 			&i.Text,
-			&i.Attachments,
 			&i.ReplyToID,
 			&i.ReactionCounts,
 			&i.Metadata,
@@ -231,8 +384,59 @@ func (q *Queries) ListLastMessages(ctx context.Context, arg ListLastMessagesPara
 	return items, nil
 }
 
+const listMessagePreviews = `-- name: ListMessagePreviews :many
+SELECT md.id, md.seq, md.channel_id, md.sender_external_id, md.text, md.deleted_at,
+       EXISTS (SELECT 1 FROM message_attachments ma WHERE ma.message_id = md.id) AS has_attachments
+FROM message_details md
+WHERE md.tenant_id = $1 AND md.id = ANY(string_to_array($2::text, ',')::uuid[])
+`
+
+type ListMessagePreviewsParams struct {
+	TenantID   uuid.UUID
+	MessageIds string
+}
+
+type ListMessagePreviewsRow struct {
+	ID               uuid.UUID
+	Seq              int64
+	ChannelID        uuid.UUID
+	SenderExternalID *string
+	Text             *string
+	DeletedAt        *time.Time
+	HasAttachments   bool
+}
+
+// The short form of the given messages (comma separated ids), for the "replying to" line of a reply.
+func (q *Queries) ListMessagePreviews(ctx context.Context, arg ListMessagePreviewsParams) ([]ListMessagePreviewsRow, error) {
+	rows, err := q.db.Query(ctx, listMessagePreviews, arg.TenantID, arg.MessageIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListMessagePreviewsRow{}
+	for rows.Next() {
+		var i ListMessagePreviewsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Seq,
+			&i.ChannelID,
+			&i.SenderExternalID,
+			&i.Text,
+			&i.DeletedAt,
+			&i.HasAttachments,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listMessages = `-- name: ListMessages :many
-SELECT channel_id, seq, id, tenant_id, sender_id, client_msg_id, type, text, attachments, reply_to_id, reaction_counts, metadata, rev_seq, edited_at, deleted_at, created_at, sender_external_id, sender_name, sender_avatar_url, sender_metadata, sender_deleted_at FROM message_details
+SELECT channel_id, seq, id, tenant_id, sender_id, client_msg_id, type, text, reply_to_id, reaction_counts, metadata, rev_seq, edited_at, deleted_at, created_at, sender_external_id, sender_name, sender_avatar_url, sender_metadata, sender_deleted_at FROM message_details
 WHERE channel_id = $1 AND tenant_id = $2
   AND ($3::bigint = 0 OR seq < $3::bigint)
 ORDER BY seq DESC
@@ -270,7 +474,6 @@ func (q *Queries) ListMessages(ctx context.Context, arg ListMessagesParams) ([]M
 			&i.ClientMsgID,
 			&i.Type,
 			&i.Text,
-			&i.Attachments,
 			&i.ReplyToID,
 			&i.ReactionCounts,
 			&i.Metadata,
@@ -284,6 +487,42 @@ func (q *Queries) ListMessages(ctx context.Context, arg ListMessagesParams) ([]M
 			&i.SenderMetadata,
 			&i.SenderDeletedAt,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listMyReactions = `-- name: ListMyReactions :many
+SELECT message_id, emoji FROM message_reactions
+WHERE user_id = $1 AND message_id = ANY(string_to_array($2::text, ',')::uuid[])
+`
+
+type ListMyReactionsParams struct {
+	UserID     uuid.UUID
+	MessageIds string
+}
+
+type ListMyReactionsRow struct {
+	MessageID uuid.UUID
+	Emoji     string
+}
+
+// What one user reacted with on the given messages (comma separated ids).
+func (q *Queries) ListMyReactions(ctx context.Context, arg ListMyReactionsParams) ([]ListMyReactionsRow, error) {
+	rows, err := q.db.Query(ctx, listMyReactions, arg.UserID, arg.MessageIds)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListMyReactionsRow{}
+	for rows.Next() {
+		var i ListMyReactionsRow
+		if err := rows.Scan(&i.MessageID, &i.Emoji); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -348,6 +587,35 @@ func (q *Queries) ListPushRecipients(ctx context.Context, arg ListPushRecipients
 	return items, nil
 }
 
+const listReactionsOfMessage = `-- name: ListReactionsOfMessage :many
+SELECT user_id, emoji FROM message_reactions WHERE message_id = $1
+`
+
+type ListReactionsOfMessageRow struct {
+	UserID uuid.UUID
+	Emoji  string
+}
+
+func (q *Queries) ListReactionsOfMessage(ctx context.Context, messageID uuid.UUID) ([]ListReactionsOfMessageRow, error) {
+	rows, err := q.db.Query(ctx, listReactionsOfMessage, messageID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListReactionsOfMessageRow{}
+	for rows.Next() {
+		var i ListReactionsOfMessageRow
+		if err := rows.Scan(&i.UserID, &i.Emoji); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const markRead = `-- name: MarkRead :one
 UPDATE channel_members cm
 SET last_read_seq = GREATEST(cm.last_read_seq, LEAST($1::bigint, c.last_seq))
@@ -377,8 +645,62 @@ func (q *Queries) MarkRead(ctx context.Context, arg MarkReadParams) (int64, erro
 	return last_read_seq, err
 }
 
+const reviseMessage = `-- name: ReviseMessage :exec
+UPDATE messages SET rev_seq = $1 WHERE id = $2 AND tenant_id = $3
+`
+
+type ReviseMessageParams struct {
+	RevSeq   int64
+	ID       uuid.UUID
+	TenantID uuid.UUID
+}
+
+func (q *Queries) ReviseMessage(ctx context.Context, arg ReviseMessageParams) error {
+	_, err := q.db.Exec(ctx, reviseMessage, arg.RevSeq, arg.ID, arg.TenantID)
+	return err
+}
+
+const reviseMessageDeleted = `-- name: ReviseMessageDeleted :exec
+UPDATE messages SET text = NULL, deleted_at = now(), reaction_counts = '{}'::jsonb, rev_seq = $1
+WHERE id = $2 AND tenant_id = $3 AND deleted_at IS NULL
+`
+
+type ReviseMessageDeletedParams struct {
+	RevSeq   int64
+	ID       uuid.UUID
+	TenantID uuid.UUID
+}
+
+// A tombstone keeps the place of the message and nothing of its content.
+func (q *Queries) ReviseMessageDeleted(ctx context.Context, arg ReviseMessageDeletedParams) error {
+	_, err := q.db.Exec(ctx, reviseMessageDeleted, arg.RevSeq, arg.ID, arg.TenantID)
+	return err
+}
+
+const reviseMessageText = `-- name: ReviseMessageText :exec
+UPDATE messages SET text = $1, edited_at = now(), rev_seq = $2
+WHERE id = $3 AND tenant_id = $4 AND deleted_at IS NULL
+`
+
+type ReviseMessageTextParams struct {
+	Text     *string
+	RevSeq   int64
+	ID       uuid.UUID
+	TenantID uuid.UUID
+}
+
+func (q *Queries) ReviseMessageText(ctx context.Context, arg ReviseMessageTextParams) error {
+	_, err := q.db.Exec(ctx, reviseMessageText,
+		arg.Text,
+		arg.RevSeq,
+		arg.ID,
+		arg.TenantID,
+	)
+	return err
+}
+
 const syncMessages = `-- name: SyncMessages :many
-SELECT channel_id, seq, id, tenant_id, sender_id, client_msg_id, type, text, attachments, reply_to_id, reaction_counts, metadata, rev_seq, edited_at, deleted_at, created_at, sender_external_id, sender_name, sender_avatar_url, sender_metadata, sender_deleted_at FROM message_details
+SELECT channel_id, seq, id, tenant_id, sender_id, client_msg_id, type, text, reply_to_id, reaction_counts, metadata, rev_seq, edited_at, deleted_at, created_at, sender_external_id, sender_name, sender_avatar_url, sender_metadata, sender_deleted_at FROM message_details
 WHERE channel_id = $1 AND tenant_id = $2 AND rev_seq > $3
 ORDER BY rev_seq
 LIMIT $4
@@ -415,7 +737,6 @@ func (q *Queries) SyncMessages(ctx context.Context, arg SyncMessagesParams) ([]M
 			&i.ClientMsgID,
 			&i.Type,
 			&i.Text,
-			&i.Attachments,
 			&i.ReplyToID,
 			&i.ReactionCounts,
 			&i.Metadata,

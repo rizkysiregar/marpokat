@@ -12,6 +12,7 @@ import (
 	"github.com/rizkysiregar/marpokat/server/internal/auth"
 	"github.com/rizkysiregar/marpokat/server/internal/channel"
 	"github.com/rizkysiregar/marpokat/server/internal/device"
+	"github.com/rizkysiregar/marpokat/server/internal/media"
 	"github.com/rizkysiregar/marpokat/server/internal/message"
 	"github.com/rizkysiregar/marpokat/server/internal/platform/health"
 	"github.com/rizkysiregar/marpokat/server/internal/platform/httpx"
@@ -35,6 +36,8 @@ type Deps struct {
 	Redis   *redisx.Client
 	Hub     *realtime.Hub
 	Metrics *metrics.Registry
+	// Storage holds the attachments; without it there are no attachments.
+	Storage *media.Storage
 	// Realtime overrides the realtime timings; the zero value means realtime.DefaultOptions().
 	Realtime realtime.Options
 }
@@ -48,6 +51,13 @@ func PublicRoutes(d Deps) http.Handler {
 	mw := auth.NewMiddleware(resolver, lookup, d.Log)
 	channels := channel.NewService(d.Pool)
 	messages := message.NewService(d.Pool)
+	var signer message.AttachmentSigner
+	if d.Storage != nil {
+		signer = media.NewSigner(d.Storage)
+	}
+	hydrator := message.NewHydrator(store.New(d.Pool), signer)
+	channels.SetHydrator(hydrator)
+	messages.SetHydrator(hydrator)
 
 	mux := http.NewServeMux()
 	// reachable through Cloudflare, used to check the tunnel and ingress; no dependency checks
@@ -72,6 +82,13 @@ func PublicRoutes(d Deps) http.Handler {
 			Tenants: resolver, Users: lookup, UserSvc: users, Messages: messages, Queries: store.New(d.Pool),
 			Options: opts, Log: d.Log, Metrics: d.Metrics,
 		}).Register(mux, mw.User)
+	}
+	if d.Storage != nil {
+		attachments := media.NewService(d.Pool, d.Storage, signer)
+		if d.Redis != nil {
+			attachments.SetLimiter(ratelimit.New(d.Redis, d.Log))
+		}
+		media.NewHandler(attachments, d.Log).Register(mux, mw.User)
 	}
 	device.NewHandler(device.NewService(d.Pool), d.Log).Register(mux, mw.User)
 	channel.NewHandler(channels, d.Log).Register(mux, mw.User, mw.Server)

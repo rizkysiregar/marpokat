@@ -27,6 +27,7 @@ func Open(ctx context.Context, c config.MinIO) (*Store, error) {
 	mc, err := minio.New(host, &minio.Options{
 		Creds:  credentials.NewStaticV4(c.AccessKey, c.SecretKey, ""),
 		Secure: secure,
+		Region: c.Region,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("storage: create client: %w", err)

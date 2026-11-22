@@ -18,6 +18,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/rizkysiregar/marpokat/server/internal/auth"
+	"github.com/rizkysiregar/marpokat/server/internal/media"
 	"github.com/rizkysiregar/marpokat/server/internal/platform/httpx"
 	"github.com/rizkysiregar/marpokat/server/internal/platform/secretbox"
 	"github.com/rizkysiregar/marpokat/server/internal/store"
@@ -32,6 +33,7 @@ type env struct {
 	srv     *httptest.Server
 	tenants *tenant.Service
 	pods    []*pod // set by newRealtimeEnv; srv is the first
+	files   *media.Storage
 }
 
 func newEnv(t *testing.T) *env {

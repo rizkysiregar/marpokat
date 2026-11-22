@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"sync"
 	"testing"
 	"time"
@@ -22,10 +23,12 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/rizkysiregar/marpokat/server/internal/broker"
+	"github.com/rizkysiregar/marpokat/server/internal/media"
 	"github.com/rizkysiregar/marpokat/server/internal/platform/metrics"
 	"github.com/rizkysiregar/marpokat/server/internal/platform/rabbitmq"
 	"github.com/rizkysiregar/marpokat/server/internal/platform/redisx"
 	"github.com/rizkysiregar/marpokat/server/internal/platform/secretbox"
+	"github.com/rizkysiregar/marpokat/server/internal/store"
 	"github.com/rizkysiregar/marpokat/server/internal/testdb"
 )
 
@@ -173,6 +176,24 @@ type testWorker struct {
 // its own (a prefix per test) and short retry delays.
 func startWorker(t *testing.T, g *fakeGoogle, tweak func(*WorkerOptions)) *testWorker {
 	t.Helper()
+	return startWorkerWith(t, g, false, tweak)
+}
+
+// startMediaWorker is startWorker with the thumbnail jobs, which need object storage.
+func startMediaWorker(t *testing.T, g *fakeGoogle, tweak func(*WorkerOptions)) *testWorker {
+	t.Helper()
+	return startWorkerWith(t, g, true, func(o *WorkerOptions) {
+		if path, err := exec.LookPath("ffmpeg"); err == nil {
+			o.FFmpeg = path
+		}
+		if tweak != nil {
+			tweak(o)
+		}
+	})
+}
+
+func startWorkerWith(t *testing.T, g *fakeGoogle, withMedia bool, tweak func(*WorkerOptions)) *testWorker {
+	t.Helper()
 	box, err := secretbox.New(bytes.Repeat([]byte{7}, 32))
 	if err != nil {
 		t.Fatal(err)
@@ -195,7 +216,11 @@ func startWorker(t *testing.T, g *fakeGoogle, tweak func(*WorkerOptions)) *testW
 		tweak(&opts)
 	}
 	m := metrics.New("test")
-	w := NewWorker(WorkerDeps{Pool: testdb.Pool(t), Redis: rdb, Rabbit: conn, Box: box, Log: log, Metrics: m, Options: opts})
+	var files *media.Storage
+	if withMedia {
+		files = testStorage(t)
+	}
+	w := NewWorker(WorkerDeps{Pool: testdb.Pool(t), Redis: rdb, Rabbit: conn, Storage: files, Box: box, Log: log, Metrics: m, Options: opts})
 
 	ctx, cancel := context.WithCancel(context.Background())
 	connCtx, stopConn := context.WithCancel(context.Background())
@@ -338,3 +363,6 @@ func (r *recordingPublisher) all() []broker.Envelope {
 	defer r.mu.Unlock()
 	return append([]broker.Envelope(nil), r.envs...)
 }
+
+// testStoreQueries is a query handle on the shared test database.
+func testStoreQueries(t *testing.T) store.Querier { return store.New(testdb.Pool(t)) }

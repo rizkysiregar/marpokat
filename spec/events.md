@@ -151,7 +151,7 @@ the change took (section 6).
 | Type                | Data                                                                                     | When                                                       |
 | ------------------- | ---------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
 | `message.new`       | `{ channel_id, rev_seq, message: Message }`                                              | A message was posted (including system messages)           |
-| `message.updated`   | `{ channel_id, rev_seq, message: Message }`                                              | Edited, or an attachment became `ready`/`failed`           |
+| `message.updated`   | `{ channel_id, rev_seq, message: Message }`                                              | Edited, or an attachment became `ready`/`failed` (the message takes a new `rev_seq`, its `seq` stays) |
 | `message.deleted`   | `{ channel_id, rev_seq, message: Message }` (tombstone: `deleted_at` set, no content)    | Deleted                                                    |
 | `reaction.added`    | `{ channel_id, rev_seq, message_id, user_id, emoji, reactions: ReactionSummary }`        | A reaction was added                                       |
 | `reaction.removed`  | `{ channel_id, rev_seq, message_id, user_id, emoji, reactions: ReactionSummary }`        | A reaction was removed                                     |
@@ -184,6 +184,9 @@ In `ReactionSummary` inside events, `mine` is computed for the receiving user.
 | `channel.removed` | the user who lost the channel, on all devices; `reason` is `left` or `removed` |
 | `member.added` | the members who were already there, not the new one (who gets `channel.added`) |
 | `member.removed` | the members who remain |
+| `message.updated` | every active member, each with the reactions that are their own as `mine` |
+| `message.deleted` | every active member: the tombstone, with `deleted_at` set and no content |
+| `reaction.added` / `reaction.removed` | every active member (the reactor included), with the summary as that member sees it: `mine` is theirs |
 
 The announcement of a membership change (a system `message.new`) follows the event of the change: a new member hears
 `channel.added` first, so the channel is known when its messages arrive. Delivery is best effort: after a long
@@ -195,6 +198,15 @@ A client that just connected does not know who is online. `GET /v1/presence?user
 answers `{"users": [{"user_id", "online", "last_seen_at"}]}` for the users who share a channel with the caller; the
 others are left out. A connection counts as online for 70 seconds after its last ping, so a user whose connection
 died without goodbye goes offline by itself.
+
+### 5.3 Attachments and thumbnails
+
+A picture or video is sent in three steps, none of which passes through the WebSocket: `POST /v1/attachments`, a `PUT`
+of the file to the link it returns, `POST /v1/attachments/{id}/complete`. The message then carries `attachment_ids`
+(over REST, or in `message.send`). A thumbnail takes a moment, so a message may go out while it is still
+`processing`: `message.new` shows the attachment without links, and `message.updated` follows with `status: ready`,
+`width`, `height`, `blurhash`, `url` and `thumbnail_url` (or `failed`). Clients show the blurhash until then. The links
+are presigned and last an hour: load the message again (history or sync) for fresh ones.
 
 ## 6. Ordering, gaps and sync
 

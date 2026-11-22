@@ -7,12 +7,14 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/rizkysiregar/marpokat/server/internal/media"
 	"github.com/rizkysiregar/marpokat/server/internal/platform/config"
 	"github.com/rizkysiregar/marpokat/server/internal/platform/db"
 	"github.com/rizkysiregar/marpokat/server/internal/platform/health"
 	"github.com/rizkysiregar/marpokat/server/internal/platform/httpx"
 	"github.com/rizkysiregar/marpokat/server/internal/platform/metrics"
 	"github.com/rizkysiregar/marpokat/server/internal/platform/redisx"
+	"github.com/rizkysiregar/marpokat/server/internal/platform/storage"
 	"github.com/rizkysiregar/marpokat/server/internal/realtime"
 )
 
@@ -20,6 +22,7 @@ type apiConfig struct {
 	Server   config.Server
 	Postgres config.Postgres
 	Redis    config.Redis
+	MinIO    config.MinIO
 	Secrets  config.Secrets
 }
 
@@ -47,9 +50,15 @@ func RunAPI(ctx context.Context, info Info) error {
 	}
 	defer func() { _ = rdb.Close() }()
 
+	files, err := storage.Open(ctx, cfg.MinIO)
+	if err != nil {
+		return err
+	}
+
 	reg := health.NewRegistry()
 	reg.Add("postgres", pool.Ping)
 	reg.Add("redis", func(ctx context.Context) error { return rdb.Ping(ctx).Err() })
+	reg.Add("storage", files.Check)
 	m := metrics.New(info.Version)
 
 	hub := realtime.NewHub(rdb, log, realtime.DefaultOptions(), m)
@@ -61,7 +70,7 @@ func RunAPI(ctx context.Context, info Info) error {
 		return nil
 	})
 	public := httpx.NewServer(cfg.Server.HTTPAddr, httpx.Chain(
-		PublicRoutes(Deps{Info: info, Pool: pool, Box: box, Log: log, Redis: rdb, Hub: hub, Metrics: m}),
+		PublicRoutes(Deps{Info: info, Pool: pool, Box: box, Log: log, Redis: rdb, Hub: hub, Metrics: m, Storage: media.NewStorage(files)}),
 		httpx.WithCORS(),
 		httpx.WithRequestID(),
 		httpx.WithObservability(log, m),

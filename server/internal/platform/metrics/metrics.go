@@ -29,6 +29,7 @@ type Registry struct {
 	PushSent              *prometheus.CounterVec
 	PushFailed            *prometheus.CounterVec
 	PushSkipped           *prometheus.CounterVec
+	MediaProcessed        *prometheus.CounterVec
 }
 
 func New(version string) *Registry {
@@ -109,10 +110,14 @@ func New(version string) *Registry {
 			Name: "marpokat_push_skipped_total",
 			Help: "Messages or recipients that got no push, by reason: system, stale, no_credentials, online, duplicate.",
 		}, []string{"reason"}),
+		MediaProcessed: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "marpokat_media_processed_total",
+			Help: "Uploads a worker finished with: ready, or failed (the file could not be read).",
+		}, []string{"result"}),
 	}
 	r.MustRegister(build, m.HTTPRequests, m.HTTPDuration, m.WSConnections, m.WSClosed, m.WSFramesIn, m.WSEventsDelivered,
 		m.OutboxPending, m.OutboxPublished, m.OutboxPublishFailures, m.OutboxLag, m.QueueMessages, m.ConsumerHandled,
-		m.PushSent, m.PushFailed, m.PushSkipped)
+		m.PushSent, m.PushFailed, m.PushSkipped, m.MediaProcessed)
 	return m
 }
 

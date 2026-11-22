@@ -26,10 +26,14 @@ const (
 )
 
 // Notifier tells connected clients about what just happened, after it was committed (PLAN M3). Delivery is best
-// effort: clients that miss an event catch up with sync. origin is the connection that caused the change, which
-// already knows (it gets an ack), or "".
+// effort: clients that miss an event catch up with sync. Messages are handed over hydrated for the actor; the notifier
+// completes them for each receiver where that differs (the reactions a receiver made themselves).
 type Notifier interface {
+	// MessageCreated: origin is the connection that sent the message, which already knows (it gets an ack), or "".
 	MessageCreated(ctx context.Context, tenantID uuid.UUID, msg Message, origin string)
+	MessageUpdated(ctx context.Context, tenantID uuid.UUID, msg Message)
+	MessageDeleted(ctx context.Context, tenantID uuid.UUID, msg Message)
+	ReactionChanged(ctx context.Context, tenantID uuid.UUID, msg Message, userID uuid.UUID, emoji string, added bool)
 	ReadUpdated(ctx context.Context, tenantID, channelID, userID uuid.UUID, lastReadSeq int64, origin string)
 }
 
@@ -52,21 +56,28 @@ type Service struct {
 	q        store.Querier
 	notifier Notifier
 	limiter  Limiter
+	hyd      *Hydrator
 }
 
 func NewService(pool *pgxpool.Pool) *Service { return &Service{pool: pool, q: store.New(pool)} }
 
-// SetNotifier and SetLimiter are called once while wiring, before the service takes requests.
-func (s *Service) SetNotifier(n Notifier) { s.notifier = n }
-func (s *Service) SetLimiter(l Limiter)   { s.limiter = l }
+// SetNotifier, SetLimiter and SetHydrator are called once while wiring, before the service takes requests.
+func (s *Service) SetNotifier(n Notifier)  { s.notifier = n }
+func (s *Service) SetLimiter(l Limiter)    { s.limiter = l }
+func (s *Service) SetHydrator(h *Hydrator) { s.hyd = h }
 
 // SendInput is one message from a user.
 type SendInput struct {
-	TenantID    uuid.UUID
-	ChannelID   uuid.UUID
-	SenderID    uuid.UUID
+	TenantID  uuid.UUID
+	ChannelID uuid.UUID
+	SenderID  uuid.UUID
+	// ClientMsgID makes sending idempotent (PLAN D9).
 	ClientMsgID string
 	Text        string
+	// AttachmentIDs are uploads of the sender, in the order to show them (at most 10).
+	AttachmentIDs []uuid.UUID
+	// ReplyToID is a message of the same channel this one answers.
+	ReplyToID uuid.NullUUID
 	// Origin is the WebSocket connection that sends, so that its owner is not sent the message back as an event.
 	Origin string
 }
@@ -80,10 +91,20 @@ func (in *SendInput) Validate() error {
 	}
 	in.Text = strings.TrimSpace(in.Text)
 	switch n := utf8.RuneCountInString(in.Text); {
-	case n == 0:
-		errs["text"] = "must not be empty"
+	case n == 0 && len(in.AttachmentIDs) == 0:
+		errs["text"] = "must not be empty unless attachments are sent"
 	case n > MaxTextLength:
 		errs["text"] = fmt.Sprintf("must be at most %d characters", MaxTextLength)
+	}
+	if len(in.AttachmentIDs) > MaxAttachmentsPerMessage {
+		errs["attachment_ids"] = fmt.Sprintf("at most %d attachments per message", MaxAttachmentsPerMessage)
+	}
+	seen := map[uuid.UUID]bool{}
+	for _, id := range in.AttachmentIDs {
+		if seen[id] {
+			errs["attachment_ids"] = "the same attachment is listed twice"
+		}
+		seen[id] = true
 	}
 	return errs.OrNil()
 }
@@ -95,6 +116,11 @@ func printable(s string) bool {
 		}
 	}
 	return utf8.ValidString(s)
+}
+
+// hydrate completes a slice of messages for the reader in place (attachments, reply previews, their own reactions).
+func (s *Service) hydrate(ctx context.Context, tenantID, viewerID uuid.UUID, msgs []Message) error {
+	return s.hyd.Hydrate(ctx, tenantID, viewerID, msgs)
 }
 
 // Send stores a message from a member. It is idempotent on client_msg_id: sending the same id again returns the
@@ -124,17 +150,37 @@ func (s *Service) Send(ctx context.Context, in SendInput) (msg Message, created 
 			return Message{}, false, httpx.ErrRateLimited(wait, "this app is sending too fast, try again in %s", wait.Round(time.Millisecond))
 		}
 	}
+	if in.ReplyToID.Valid {
+		target, err := s.q.GetMessageByID(ctx, store.GetMessageByIDParams{ID: in.ReplyToID.UUID, TenantID: in.TenantID})
+		if errors.Is(err, pgx.ErrNoRows) || (err == nil && target.ChannelID != in.ChannelID) {
+			return Message{}, false, httpx.FieldErrors{"reply_to_id": "must be a message of this channel"}
+		}
+		if err != nil {
+			return Message{}, false, fmt.Errorf("message: load replied message: %w", err)
+		}
+	}
 
 	var appended Appended
 	cmid := in.ClientMsgID
-	text := in.Text
+	var text *string
+	if in.Text != "" {
+		text = &in.Text
+	}
+	msgType := TypeText
+	if len(in.AttachmentIDs) > 0 {
+		msgType = TypeMedia
+	}
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		q := store.New(tx)
+		if err := checkAttachments(ctx, q, in.TenantID, in.SenderID, in.AttachmentIDs); err != nil {
+			return err
+		}
 		var err error
 		appended, err = Append(ctx, q, AppendInput{
 			TenantID: in.TenantID, ChannelID: in.ChannelID,
 			SenderID:    uuid.NullUUID{UUID: in.SenderID, Valid: true},
-			ClientMsgID: &cmid, Type: TypeText, Text: &text, RefuseFrozen: true,
+			ClientMsgID: &cmid, Type: msgType, Text: text, ReplyToID: in.ReplyToID, AttachmentIDs: in.AttachmentIDs,
+			RefuseFrozen: true,
 		})
 		if err != nil {
 			return err
@@ -146,6 +192,8 @@ func (s *Service) Send(ctx context.Context, in SendInput) (msg Message, created 
 	switch {
 	case errors.Is(err, ErrNotAppendable):
 		return Message{}, false, httpx.ErrFrozen() // the channel was frozen after the check above
+	case isUniqueViolation(err) && strings.HasPrefix(constraintOf(err), "message_attachments"):
+		return Message{}, false, httpx.ErrConflict("an attachment of this message is already used by another message")
 	case isUniqueViolation(err):
 		// the same client_msg_id arrived twice at once: the other request won, answer with its message
 		existing, ok, lerr := s.byClientID(ctx, in)
@@ -154,17 +202,53 @@ func (s *Service) Send(ctx context.Context, in SendInput) (msg Message, created 
 		}
 		return existing, false, nil
 	case err != nil:
-		return Message{}, false, fmt.Errorf("message: send: %w", err)
+		return Message{}, false, wrapUnlessAPI(err, "send")
 	}
 	d, err := s.q.GetMessageBySeq(ctx, store.GetMessageBySeqParams{ChannelID: in.ChannelID, TenantID: in.TenantID, Seq: appended.Seq})
 	if err != nil {
 		return Message{}, false, fmt.Errorf("message: load sent message: %w", err)
 	}
-	msg = FromDetail(d)
+	msg = s.hydrated(ctx, in.TenantID, in.SenderID, FromDetail(d))
 	if s.notifier != nil {
 		s.notifier.MessageCreated(ctx, in.TenantID, msg, in.Origin)
 	}
 	return msg, true, nil
+}
+
+// hydrated returns the message completed for the reader. The sender's own message needs it for the attachments and
+// the preview of the reply; it cannot fail a send that is already committed, so a failure only costs the extras.
+func (s *Service) hydrated(ctx context.Context, tenantID, viewerID uuid.UUID, m Message) Message {
+	if err := s.hyd.HydrateOne(ctx, tenantID, viewerID, &m); err != nil {
+		return m
+	}
+	return m
+}
+
+// checkAttachments: every attachment exists, is the sender's, and has been uploaded (and did not fail).
+func checkAttachments(ctx context.Context, q store.Querier, tenantID, senderID uuid.UUID, ids []uuid.UUID) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	rows, err := q.GetAttachmentsByIDs(ctx, store.GetAttachmentsByIDsParams{TenantID: tenantID, Ids: csv(ids)})
+	if err != nil {
+		return fmt.Errorf("message: load attachments: %w", err)
+	}
+	byID := make(map[uuid.UUID]store.Attachment, len(rows))
+	for _, r := range rows {
+		byID[r.ID] = r
+	}
+	for _, id := range ids {
+		a, ok := byID[id]
+		switch {
+		case !ok || a.UploaderID != senderID: // someone else's upload does not exist for you
+			return httpx.FieldErrors{"attachment_ids": fmt.Sprintf("attachment %s does not exist", id)}
+		case a.Status == StatusPending:
+			return httpx.FieldErrors{"attachment_ids": fmt.Sprintf("attachment %s is not uploaded yet: upload it, then call complete", id)}
+		case a.Status == StatusFailed:
+			return httpx.FieldErrors{"attachment_ids": fmt.Sprintf("attachment %s failed: upload it again", id)}
+		}
+	}
+	return nil
 }
 
 func (s *Service) byClientID(ctx context.Context, in SendInput) (Message, bool, error) {
@@ -179,12 +263,31 @@ func (s *Service) byClientID(ctx context.Context, in SendInput) (Message, bool, 
 	if err != nil {
 		return Message{}, false, fmt.Errorf("message: lookup client_msg_id: %w", err)
 	}
-	return FromDetail(d), true, nil
+	m := s.hydrated(ctx, in.TenantID, in.SenderID, FromDetail(d))
+	return m, true, nil
 }
 
 func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
+func constraintOf(err error) string {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.ConstraintName
+	}
+	return ""
+}
+
+// wrapUnlessAPI adds context to unexpected errors and leaves API errors (404, 403, validation) as they are.
+func wrapUnlessAPI(err error, what string) error {
+	var apiErr *httpx.Error
+	var fields httpx.FieldErrors
+	if errors.As(err, &apiErr) || errors.As(err, &fields) {
+		return err
+	}
+	return fmt.Errorf("message: %s: %w", what, err)
 }
 
 // requireMember is the access check of every read: a channel you are not in (or that is in another tenant) does
@@ -211,7 +314,11 @@ func (s *Service) History(ctx context.Context, tenantID, channelID, userID uuid.
 	if err != nil {
 		return nil, false, fmt.Errorf("message: list: %w", err)
 	}
-	return page(rows, limit)
+	msgs, hasMore := page(rows, limit)
+	if err := s.hydrate(ctx, tenantID, userID, msgs); err != nil {
+		return nil, false, err
+	}
+	return msgs, hasMore, nil
 }
 
 // SyncPage is the answer of Sync.
@@ -235,8 +342,8 @@ func (s *Service) Sync(ctx context.Context, tenantID, channelID, userID uuid.UUI
 	if err != nil {
 		return SyncPage{}, fmt.Errorf("message: sync: %w", err)
 	}
-	msgs, hasMore, err := page(rows, limit)
-	if err != nil {
+	msgs, hasMore := page(rows, limit)
+	if err := s.hydrate(ctx, tenantID, userID, msgs); err != nil {
 		return SyncPage{}, err
 	}
 	ch, err := s.q.GetChannel(ctx, store.GetChannelParams{ID: channelID, TenantID: tenantID})
@@ -250,7 +357,7 @@ func (s *Service) Sync(ctx context.Context, tenantID, channelID, userID uuid.UUI
 	return SyncPage{Messages: msgs, NextRev: next, HasMore: hasMore, ChannelLastSeq: ch.LastSeq}, nil
 }
 
-func page(rows []store.MessageDetail, limit int) ([]Message, bool, error) {
+func page(rows []store.MessageDetail, limit int) ([]Message, bool) {
 	hasMore := len(rows) > limit
 	if hasMore {
 		rows = rows[:limit]
@@ -259,7 +366,7 @@ func page(rows []store.MessageDetail, limit int) ([]Message, bool, error) {
 	for _, r := range rows {
 		out = append(out, FromDetail(r))
 	}
-	return out, hasMore, nil
+	return out, hasMore
 }
 
 // MarkRead moves the read marker of the user forward and returns where it is now. origin is the WebSocket

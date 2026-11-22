@@ -24,7 +24,10 @@ type AppendInput struct {
 	ClientMsgID *string
 	Type        string
 	Text        *string
-	Metadata    map[string]any
+	ReplyToID   uuid.NullUUID
+	// AttachmentIDs are linked to the message, in this order. The caller has checked them (see Service.Send).
+	AttachmentIDs []uuid.UUID
+	Metadata      map[string]any
 	// RefuseFrozen makes a frozen channel reject the message. System messages are allowed into frozen channels.
 	RefuseFrozen bool
 }
@@ -63,12 +66,18 @@ func Append(ctx context.Context, q store.Querier, in AppendInput) (Appended, err
 		ClientMsgID: in.ClientMsgID,
 		Type:        in.Type,
 		Text:        in.Text,
+		ReplyToID:   in.ReplyToID,
 		Metadata:    md,
 		RevSeq:      bumped.LastSeq,
 		CreatedAt:   *bumped.LastMessageAt,
 	})
 	if err != nil {
 		return Appended{}, err // unique violations are interpreted by Send
+	}
+	for i, attachmentID := range in.AttachmentIDs {
+		if err := q.LinkAttachment(ctx, store.LinkAttachmentParams{MessageID: id, AttachmentID: attachmentID, Position: int16(i)}); err != nil { //nolint:gosec // at most 10
+			return Appended{}, err
+		}
 	}
 	sender := ""
 	if in.SenderID.Valid {

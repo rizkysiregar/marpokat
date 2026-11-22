@@ -28,19 +28,23 @@ const (
 
 // Server to client.
 const (
-	typeAuthOK       = "auth.ok"
-	typePong         = "pong"
-	typeAck          = "ack"
-	typeError        = "error"
-	EvMessageNew     = "message.new"
-	EvReadUpdated    = "read.updated"
-	EvTyping         = "typing"
-	EvPresence       = "presence"
-	EvChannelAdded   = "channel.added"
-	EvChannelUpdated = "channel.updated"
-	EvChannelRemoved = "channel.removed"
-	EvMemberAdded    = "member.added"
-	EvMemberRemoved  = "member.removed"
+	typeAuthOK        = "auth.ok"
+	typePong          = "pong"
+	typeAck           = "ack"
+	typeError         = "error"
+	EvMessageNew      = "message.new"
+	EvMessageUpdated  = "message.updated"
+	EvMessageDeleted  = "message.deleted"
+	EvReactionAdded   = "reaction.added"
+	EvReactionRemoved = "reaction.removed"
+	EvReadUpdated     = "read.updated"
+	EvTyping          = "typing"
+	EvPresence        = "presence"
+	EvChannelAdded    = "channel.added"
+	EvChannelUpdated  = "channel.updated"
+	EvChannelRemoved  = "channel.removed"
+	EvMemberAdded     = "member.added"
+	EvMemberRemoved   = "member.removed"
 )
 
 // Close codes (spec/events.md, section 9).

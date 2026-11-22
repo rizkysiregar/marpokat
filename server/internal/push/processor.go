@@ -13,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/rizkysiregar/marpokat/server/internal/broker"
+	"github.com/rizkysiregar/marpokat/server/internal/message"
 	"github.com/rizkysiregar/marpokat/server/internal/outbox"
 	"github.com/rizkysiregar/marpokat/server/internal/platform/metrics"
 	"github.com/rizkysiregar/marpokat/server/internal/store"
@@ -166,6 +167,15 @@ func (p *Processor) Handle(ctx context.Context, env broker.Envelope, _ broker.De
 	}
 	if msg.Text != nil {
 		content.Text = *msg.Text
+	}
+	if msg.Type == "media" { // the notification says what was sent: a photo, a video, a file
+		atts, err := p.Q.ListMessageAttachments(ctx, msg.ID.String())
+		if err != nil {
+			return fmt.Errorf("load attachments: %w", err)
+		}
+		if len(atts) > 0 {
+			content.AttachmentKind = message.KindOf(atts[0].Mime)
+		}
 	}
 
 	var retry error

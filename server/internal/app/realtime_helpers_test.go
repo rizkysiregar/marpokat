@@ -19,9 +19,11 @@ import (
 	"github.com/coder/websocket"
 
 	"github.com/rizkysiregar/marpokat/server/internal/auth"
+	"github.com/rizkysiregar/marpokat/server/internal/media"
 	"github.com/rizkysiregar/marpokat/server/internal/platform/httpx"
 	"github.com/rizkysiregar/marpokat/server/internal/platform/redisx"
 	"github.com/rizkysiregar/marpokat/server/internal/platform/secretbox"
+	"github.com/rizkysiregar/marpokat/server/internal/platform/storage"
 	"github.com/rizkysiregar/marpokat/server/internal/realtime"
 	"github.com/rizkysiregar/marpokat/server/internal/store"
 	"github.com/rizkysiregar/marpokat/server/internal/tenant"
@@ -36,8 +38,16 @@ type pod struct {
 	stop context.CancelFunc
 }
 
+// envOption changes how newRealtimeEnv builds its pods.
+type envOption func(*envConfig)
+
+type envConfig struct{ media bool }
+
+// withMedia gives the pods object storage (a MinIO container), which turns on attachments.
+func withMedia() envOption { return func(c *envConfig) { c.media = true } }
+
 // newRealtimeEnv starts n pods. tweak shortens timings for the test.
-func newRealtimeEnv(t *testing.T, n int, tweak func(*realtime.Options)) *env {
+func newRealtimeEnv(t *testing.T, n int, tweak func(*realtime.Options), options ...envOption) *env {
 	t.Helper()
 	box, err := secretbox.New(bytes.Repeat([]byte{7}, 32))
 	if err != nil {
@@ -48,8 +58,16 @@ func newRealtimeEnv(t *testing.T, n int, tweak func(*realtime.Options)) *env {
 	if tweak != nil {
 		tweak(&opts)
 	}
+	var cfg envConfig
+	for _, o := range options {
+		o(&cfg)
+	}
+	var files *media.Storage
+	if cfg.media {
+		files = testStorage(t)
+	}
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
-	e := &env{t: t, tenants: tenant.NewService(store.New(pool), box)}
+	e := &env{t: t, tenants: tenant.NewService(store.New(pool), box), files: files}
 	for range n {
 		rdb, err := redisx.Open(context.Background(), testdb.Redis(t))
 		if err != nil {
@@ -58,7 +76,7 @@ func newRealtimeEnv(t *testing.T, n int, tweak func(*realtime.Options)) *env {
 		hub := realtime.NewHub(rdb, log, opts, nil)
 		hubCtx, stop := context.WithCancel(context.Background())
 		go hub.Run(hubCtx)
-		h := httpx.Chain(PublicRoutes(Deps{Info: Info{Version: "test"}, Pool: pool, Box: box, Log: log, Redis: rdb, Hub: hub, Realtime: opts}),
+		h := httpx.Chain(PublicRoutes(Deps{Info: Info{Version: "test"}, Pool: pool, Box: box, Log: log, Redis: rdb, Hub: hub, Realtime: opts, Storage: files}),
 			httpx.WithCORS(), httpx.WithRequestID())
 		srv := httptest.NewServer(h)
 		srv.Config.RegisterOnShutdown(hub.Shutdown)
@@ -272,4 +290,14 @@ func (w *wsConn) nextOf(types ...string) map[string]any {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
+}
+
+// testStorage is the object storage of the shared MinIO container.
+func testStorage(t *testing.T) *media.Storage {
+	t.Helper()
+	st, err := storage.Open(context.Background(), testdb.MinIO(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return media.NewStorage(st)
 }

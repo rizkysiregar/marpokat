@@ -9,8 +9,8 @@ WHERE id = sqlc.arg('id') AND tenant_id = sqlc.arg('tenant_id') AND deleted_at I
 RETURNING last_seq, last_message_at;
 
 -- name: InsertMessage :exec
-INSERT INTO messages (channel_id, seq, id, tenant_id, sender_id, client_msg_id, type, text, metadata, rev_seq, created_at)
-VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11);
+INSERT INTO messages (channel_id, seq, id, tenant_id, sender_id, client_msg_id, type, text, reply_to_id, metadata, rev_seq, created_at)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12);
 
 -- name: GetMessageBySeq :one
 SELECT * FROM message_details WHERE channel_id = $1 AND tenant_id = $2 AND seq = $3;
@@ -67,3 +67,67 @@ WHERE cm.channel_id = sqlc.arg('channel_id') AND cm.tenant_id = sqlc.arg('tenant
   AND cm.user_id <> sqlc.arg('sender_id') AND u.deleted_at IS NULL
   AND cm.last_read_seq < sqlc.arg('seq')::bigint
   AND (cm.muted_until IS NULL OR cm.muted_until <= now());
+
+-- name: GetMessageByID :one
+SELECT * FROM message_details WHERE id = $1 AND tenant_id = $2;
+
+-- name: BumpChannelRev :one
+-- Takes the next value of the channel counter for a change to an existing message (edit, delete, reaction, an attachment
+-- that became ready). It locks the channel row like BumpChannelSeq does, so changes commit in counter order.
+UPDATE channels
+SET last_seq = last_seq + 1
+WHERE id = sqlc.arg('id') AND tenant_id = sqlc.arg('tenant_id') AND deleted_at IS NULL
+  AND (NOT sqlc.arg('check_frozen')::boolean OR frozen_at IS NULL)
+RETURNING last_seq;
+
+-- name: ReviseMessageText :exec
+UPDATE messages SET text = sqlc.arg('text'), edited_at = now(), rev_seq = sqlc.arg('rev_seq')
+WHERE id = sqlc.arg('id') AND tenant_id = sqlc.arg('tenant_id') AND deleted_at IS NULL;
+
+-- name: ReviseMessageDeleted :exec
+-- A tombstone keeps the place of the message and nothing of its content.
+UPDATE messages SET text = NULL, deleted_at = now(), reaction_counts = '{}'::jsonb, rev_seq = sqlc.arg('rev_seq')
+WHERE id = sqlc.arg('id') AND tenant_id = sqlc.arg('tenant_id') AND deleted_at IS NULL;
+
+-- name: ReviseMessage :exec
+UPDATE messages SET rev_seq = sqlc.arg('rev_seq') WHERE id = sqlc.arg('id') AND tenant_id = sqlc.arg('tenant_id');
+
+-- name: InsertReaction :execrows
+INSERT INTO message_reactions (message_id, user_id, emoji) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING;
+
+-- name: DeleteReaction :execrows
+DELETE FROM message_reactions WHERE message_id = $1 AND user_id = $2 AND emoji = $3;
+
+-- name: DeleteMessageReactions :exec
+DELETE FROM message_reactions WHERE message_id = $1;
+
+-- name: CountUserReactions :one
+SELECT count(*)::int FROM message_reactions WHERE message_id = $1 AND user_id = $2;
+
+-- name: AdjustReactionCount :exec
+-- Keeps the per emoji counts on the message in step with message_reactions. One UPDATE reads and writes the count, so
+-- two users reacting at the same moment cannot lose one.
+UPDATE messages
+SET reaction_counts = CASE
+        WHEN coalesce((reaction_counts ->> sqlc.arg('emoji')::text)::int, 0) + sqlc.arg('delta')::int <= 0
+            THEN reaction_counts - sqlc.arg('emoji')::text
+        ELSE jsonb_set(reaction_counts, ARRAY[sqlc.arg('emoji')::text],
+                       to_jsonb(coalesce((reaction_counts ->> sqlc.arg('emoji')::text)::int, 0) + sqlc.arg('delta')::int))
+    END,
+    rev_seq = sqlc.arg('rev_seq')
+WHERE id = sqlc.arg('id') AND tenant_id = sqlc.arg('tenant_id') AND deleted_at IS NULL;
+
+-- name: ListMyReactions :many
+-- What one user reacted with on the given messages (comma separated ids).
+SELECT message_id, emoji FROM message_reactions
+WHERE user_id = sqlc.arg('user_id') AND message_id = ANY(string_to_array(sqlc.arg('message_ids')::text, ',')::uuid[]);
+
+-- name: ListReactionsOfMessage :many
+SELECT user_id, emoji FROM message_reactions WHERE message_id = $1;
+
+-- name: ListMessagePreviews :many
+-- The short form of the given messages (comma separated ids), for the "replying to" line of a reply.
+SELECT md.id, md.seq, md.channel_id, md.sender_external_id, md.text, md.deleted_at,
+       EXISTS (SELECT 1 FROM message_attachments ma WHERE ma.message_id = md.id) AS has_attachments
+FROM message_details md
+WHERE md.tenant_id = sqlc.arg('tenant_id') AND md.id = ANY(string_to_array(sqlc.arg('message_ids')::text, ',')::uuid[]);

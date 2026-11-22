@@ -31,6 +31,7 @@ func (h *Handler) Register(mux *http.ServeMux, user, server func(http.Handler) h
 	mux.Handle("DELETE /v1/channels/{channel_id}/members/{user_id}", user(http.HandlerFunc(h.removeMember)))
 
 	mux.Handle("POST /v1/server/channels/dm", server(http.HandlerFunc(h.serverDM)))
+	mux.Handle("GET /v1/server/channels/dm", server(http.HandlerFunc(h.serverFindDM)))
 	mux.Handle("POST /v1/server/channels", server(http.HandlerFunc(h.serverCreateGroup)))
 	mux.Handle("POST /v1/server/channels/{channel_id}/members", server(http.HandlerFunc(h.serverAddMembers)))
 	mux.Handle("DELETE /v1/server/channels/{channel_id}/members/{external_id}", server(http.HandlerFunc(h.serverRemoveMember)))
@@ -293,6 +294,28 @@ func (h *Handler) serverDM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.writeServerChannel(w, r, p, ch.ID, created)
+}
+
+// serverFindDM answers with the DM of two users, or 404 when they have none: to freeze it after a block, the tenant
+// backend only needs to know about a DM that exists.
+func (h *Handler) serverFindDM(w http.ResponseWriter, r *http.Request) {
+	p := auth.FromContext(r.Context())
+	a, b := r.URL.Query().Get("user_a"), r.URL.Query().Get("user_b")
+	if a == "" || b == "" || a == b {
+		h.fail(w, r, httpx.FieldErrors{"user_a": "user_a and user_b are required and must differ"})
+		return
+	}
+	users, err := h.svc.ResolveUsers(r.Context(), p.Tenant.ID, []string{a, b})
+	if err != nil {
+		h.fail(w, r, httpx.ErrNotFound("these two users have no direct message")) // unknown users have none either
+		return
+	}
+	ch, err := h.svc.FindDM(r.Context(), p.Tenant.ID, users[0].ID, users[1].ID)
+	if err != nil {
+		h.fail(w, r, err)
+		return
+	}
+	h.writeServerChannel(w, r, p, ch.ID, false)
 }
 
 func (h *Handler) serverCreateGroup(w http.ResponseWriter, r *http.Request) {

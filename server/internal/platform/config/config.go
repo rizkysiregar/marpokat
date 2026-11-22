@@ -90,6 +90,8 @@ type MinIO struct {
 	AccessKey string `env:"MINIO_ACCESS_KEY,required"`
 	SecretKey string `env:"MINIO_SECRET_KEY,required"`
 	Bucket    string `env:"MINIO_BUCKET,required"`
+	// Region is only used to sign links; naming it spares a request to the server for every link we hand out.
+	Region string `env:"MINIO_REGION" envDefault:"us-east-1"`
 }
 
 // HostAndTLS splits Endpoint into the host[:port] minio-go wants and whether to use TLS.

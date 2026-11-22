@@ -49,8 +49,11 @@ build: ## build bin/marpokat
 	CGO_ENABLED=0 go build -trimpath -ldflags="$(LDFLAGS)" -o bin/marpokat ./cmd/marpokat
 
 .PHONY: deps-up
-deps-up: ## start Postgres, pgbouncer, Redis, RabbitMQ, MinIO
+deps-up: ## start Postgres, pgbouncer, Redis, RabbitMQ, MinIO (and create the bucket; the app never creates buckets)
 	docker compose up -d
+	@until docker run --rm --network marpokat_default -e MC_HOST_local=http://marpokat:marpokat-secret@minio:9000 \
+	    cgr.dev/chainguard/minio-client:latest mb --ignore-existing local/marpokat-media-dev >/dev/null 2>&1; do sleep 1; done
+	@echo "dependencies are up, bucket marpokat-media-dev exists"
 
 .PHONY: deps-down
 deps-down: ## stop local dependencies (data is kept)

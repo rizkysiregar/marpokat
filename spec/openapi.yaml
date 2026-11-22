@@ -406,6 +406,9 @@ paths:
     patch:
       tags: [Messages]
       summary: Edit the text of your own message
+      description: |
+        Only the sender, and not in a frozen channel. The message takes a new `rev_seq` and `edited_at` is set; editing
+        to the same text changes nothing. Attachments cannot be changed.
       operationId: editMessage
       requestBody:
         required: true
@@ -428,7 +431,10 @@ paths:
     delete:
       tags: [Messages]
       summary: Delete a message
-      description: The sender, or an owner/admin of the group. Leaves a tombstone (`deleted_at` set, content removed).
+      description: |
+        The sender, or an owner/admin of a group. Leaves a tombstone: `deleted_at` set, text, attachments and reactions
+        gone, `seq` and sender kept, a new `rev_seq` (so sync delivers it). Its attachments are released and the files
+        removed a day later. Deleting a deleted message is a no-op. Not in a frozen channel.
       operationId: deleteMessage
       responses:
         "204": { description: Deleted }
@@ -446,6 +452,10 @@ paths:
     put:
       tags: [Reactions]
       summary: Add a reaction (idempotent)
+      description: |
+        `emoji` is any string of 1 to 64 bytes without spaces or control characters (apps may define their own). A user
+        has at most 10 different reactions on one message. Reacting again with the same emoji changes nothing, not even
+        `rev_seq`. Not in a frozen channel, and not on system messages.
       operationId: addReaction
       responses:
         "200":
@@ -472,8 +482,14 @@ paths:
       tags: [Attachments]
       summary: Start an upload
       description: |
-        Returns a presigned `PUT` URL valid for 15 minutes. Upload the bytes there directly with the same
-        `Content-Type`, then call `complete`. Uploads never completed are deleted after 24 hours.
+        Returns a presigned `PUT` URL valid for 15 minutes. Send the file there directly (it does not pass through
+        this API), with exactly the headers in `upload_headers`: the link is signed for the declared `Content-Type`
+        and the storage refuses another. Then call `complete`, which checks that the file is there and has the
+        declared `size`. Uploads that are never sent in a message are deleted after 24 hours.
+
+        The kind follows from `mime`: `image/jpeg|png|webp|gif|heic|heif` are images, `video/mp4|quicktime|webm|3gpp`
+        videos, everything else (SVG included) a file that is only ever offered as a download. An upload over the limit
+        of its kind is refused with `413`, with `details.max_bytes`.
       operationId: createAttachment
       requestBody:
         required: true
@@ -604,6 +620,27 @@ paths:
         "401": { $ref: "#/components/responses/Unauthenticated" }
 
   /v1/server/channels/dm:
+    get:
+      tags: [Server Channels]
+      summary: Find the DM of two users, without creating it
+      description: |
+        `404` when they have none (or one of them does not exist). To freeze a DM after a block, the tenant backend asks
+        for it first: looking must never start a conversation.
+      security:
+        - apiKey: []
+          serverToken: []
+      operationId: serverFindDM
+      parameters:
+        - { name: user_a, in: query, required: true, schema: { type: string }, description: External id }
+        - { name: user_b, in: query, required: true, schema: { type: string }, description: External id }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ServerChannel" }
+        "400": { $ref: "#/components/responses/Validation" }
+        "404": { $ref: "#/components/responses/NotFound" }
     post:
       tags: [Server Channels]
       summary: Get or create the DM between two users
@@ -1021,8 +1058,10 @@ components:
       type: object
       required: [client_msg_id]
       description: |
-        Text is required for now. `attachment_ids` and `reply_to_id` are refused with `validation_failed` until media
-        and replies are supported. Text is trimmed.
+        Text is required unless `attachment_ids` is given. Text is trimmed. Attachments must be uploads of the sender
+        that were completed (`processing` or `ready`; a `processing` one is announced with `message.updated` when its
+        thumbnail is ready), each in at most one message, at most 10 per message. `reply_to_id` must be a message of
+        the same channel (replying to one that was just deleted is allowed).
       properties:
         client_msg_id: { type: string, minLength: 1, maxLength: 64, description: "Unique per sender and channel, UUID recommended." }
         text: { type: string, maxLength: 4000 }

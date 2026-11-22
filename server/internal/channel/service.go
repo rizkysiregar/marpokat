@@ -51,12 +51,14 @@ type Service struct {
 	pool     *pgxpool.Pool
 	q        store.Querier
 	notifier Notifier
+	hyd      *message.Hydrator
 }
 
 func NewService(pool *pgxpool.Pool) *Service { return &Service{pool: pool, q: store.New(pool)} }
 
-// SetNotifier is called once while wiring, before the service takes requests.
-func (s *Service) SetNotifier(n Notifier) { s.notifier = n }
+// SetNotifier and SetHydrator are called once while wiring, before the service takes requests.
+func (s *Service) SetNotifier(n Notifier)          { s.notifier = n }
+func (s *Service) SetHydrator(h *message.Hydrator) { s.hyd = h }
 
 // ResolveUsers maps external ids to users of the tenant, in the order given and without duplicates. Users that do
 // not exist (or were deleted) are a 404 naming them: the tenant backend must upsert them first.
@@ -139,6 +141,19 @@ func (s *Service) GetOrCreateDM(ctx context.Context, tenantID, a, b uuid.UUID) (
 		s.notifier.ChannelAdded(ctx, tenantID, ch.ID, []uuid.UUID{a, b})
 	}
 	return ch, created, nil
+}
+
+// FindDM returns the DM of two users when they have one. It never creates it: asking is not a reason to start a chat.
+func (s *Service) FindDM(ctx context.Context, tenantID, a, b uuid.UUID) (store.Channel, error) {
+	key := DMKey(tenantID, a, b)
+	ch, err := s.q.GetChannelByDMKey(ctx, store.GetChannelByDMKeyParams{DmKey: &key, TenantID: tenantID})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return store.Channel{}, httpx.ErrNotFound("these two users have no direct message")
+	}
+	if err != nil {
+		return store.Channel{}, fmt.Errorf("channel: find dm: %w", err)
+	}
+	return ch, nil
 }
 
 // CreateGroup creates a group owned by creator. members must not repeat creator.
@@ -269,8 +284,16 @@ func (s *Service) build(ctx context.Context, tenantID, userID uuid.UUID, rows []
 		if err != nil {
 			return nil, fmt.Errorf("channel: last messages: %w", err)
 		}
-		for _, m := range last {
-			lastByChannel[m.ChannelID] = message.FromDetail(m)
+		msgs := make([]message.Message, len(last))
+		for i, m := range last {
+			msgs[i] = message.FromDetail(m)
+		}
+		// each channel is shown to this reader: their attachments links, their own reactions
+		if err := s.hyd.Hydrate(ctx, tenantID, userID, msgs); err != nil {
+			return nil, fmt.Errorf("channel: complete last messages: %w", err)
+		}
+		for _, m := range msgs {
+			lastByChannel[m.ChannelID] = m
 		}
 	}
 	if len(dmIDs) > 0 {

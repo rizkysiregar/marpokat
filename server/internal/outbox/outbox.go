@@ -15,6 +15,10 @@ import (
 // Topics. Payloads carry ids only; consumers load what they need.
 const (
 	TopicMessageCreated      = "message.created"       // {channel_id, message_id, seq, sender_id, type}
+	TopicMessageUpdated      = "message.updated"       // {channel_id, message_id, rev_seq}: edited, or an attachment became ready
+	TopicMessageDeleted      = "message.deleted"       // {channel_id, message_id, rev_seq}
+	TopicMessageReaction     = "message.reaction"      // {channel_id, message_id, rev_seq, user_id, emoji, added}
+	TopicAttachmentUploaded  = "attachment.uploaded"   // {attachment_id}: an image or video to make a thumbnail of
 	TopicChannelCreated      = "channel.created"       // {channel_id, type, member_ids}
 	TopicChannelUpdated      = "channel.updated"       // {channel_id}
 	TopicChannelMembersAdded = "channel.members_added" // {channel_id, user_ids}
