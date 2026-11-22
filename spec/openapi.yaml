@@ -1,0 +1,1068 @@
+openapi: 3.1.0
+info:
+  title: Marpokat API
+  version: 1.0.0-draft
+  summary: Multi-tenant chat as a service.
+  description: |
+    REST contract of Marpokat v1. The realtime (WebSocket) contract is in `spec/events.md`.
+
+    ## Two kinds of callers
+
+    - **Client API** (`/v1/...`): called by the end-user apps through the SDKs. Authenticated with the tenant's
+      public `X-Api-Key` plus a **user token**: a JWT the tenant backend signs with its `api_secret` (HS256),
+      claims `{sub: <external user id>, iat, exp}`. Marpokat never sees end-user passwords.
+    - **Server API** (`/v1/server/...`): called only by the tenant backend. Authenticated with `X-Api-Key` plus a
+      **server token**: a JWT signed with the same `api_secret`, claims `{server: true, iat, exp}`, `exp` at most
+      5 minutes after `iat`. The `api_secret` must never ship in an app.
+
+    ## Conventions
+
+    - JSON only, `snake_case` fields, timestamps are RFC 3339 UTC strings.
+    - Ids are UUIDv7 strings. Users are addressed by their **external id** (the tenant's own user id) on the server
+      API and in tokens; responses always include both `id` and `external_id`.
+    - Every response carries `X-Request-Id` (echoed when the client sends a valid one).
+    - Errors always use the `Error` schema: `{"error": {"code", "message", "request_id", "details"}}`. Clients branch
+      on `code`, never on `message`.
+    - Lists are cursor paginated: pass back `next_cursor` until it is `null`.
+    - Each channel has one sequence counter. A message's `seq` is its position (never changes); `rev_seq` is the
+      counter value of its latest change (edit, delete, reaction). Sync with `since_rev` returns every message whose
+      `rev_seq` is greater, which covers new messages and changes alike.
+
+    ## Limits (v1)
+
+    | What | Limit |
+    | --- | --- |
+    | Message text | 4000 characters |
+    | Attachments per message | 10 |
+    | Image / video / other file | 10 MB / 50 MB / 25 MB |
+    | Group members | 256 |
+    | Reactions per user per message | 10 distinct emoji |
+    | `client_msg_id` | 64 characters |
+servers:
+  - url: https://api-dev-marpokat.rizkysiregar.my.id
+    description: dev
+  - url: https://api-marpokat.rizkysiregar.my.id
+    description: prod
+security:
+  - apiKey: []
+    userToken: []
+tags:
+  - name: Me
+  - name: Channels
+  - name: Members
+  - name: Messages
+  - name: Reactions
+  - name: Attachments
+  - name: Devices
+  - name: Server Users
+    description: Server API, tenant backend only.
+  - name: Server Channels
+    description: Server API, tenant backend only.
+  - name: Meta
+
+paths:
+  /v1:
+    get:
+      tags: [Meta]
+      summary: Service name and version
+      security: []
+      operationId: getInfo
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [name, version]
+                properties:
+                  name: { type: string, example: marpokat }
+                  version: { type: string, example: 3f9c2a1b7d0e }
+
+  /healthz:
+    get:
+      tags: [Meta]
+      summary: Liveness, no dependency checks
+      security: []
+      operationId: getHealth
+      responses:
+        "200":
+          description: The process serves HTTP.
+
+  # ---------------------------------------------------------------- client API
+  /v1/me:
+    get:
+      tags: [Me]
+      summary: The authenticated user
+      operationId: getMe
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  /v1/channels:
+    get:
+      tags: [Channels]
+      summary: Channels of the authenticated user
+      description: |
+        Sorted by `last_message_at` descending (channels without messages by `created_at`). With `updated_since`
+        only channels changed after that time are returned, including ones the user left or was removed from
+        (`membership.left_at` set), so the client can drop them from its cache.
+      operationId: listChannels
+      parameters:
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+        - name: updated_since
+          in: query
+          schema: { type: string, format: date-time }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ChannelPage" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+    post:
+      tags: [Channels]
+      summary: Create a group (or a DM) as the authenticated user
+      description: |
+        Allowed only when the tenant config enables it (`client_can_create_group` / `client_can_create_dm`),
+        otherwise `403 forbidden`. Narrativ creates DMs through the server API instead. Creating a DM that already
+        exists returns the existing channel with `200`.
+      operationId: createChannel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateChannelRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Channel" }
+        "200":
+          description: The DM already existed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Channel" }
+        "400": { $ref: "#/components/responses/Validation" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /v1/channels/{channel_id}:
+    parameters:
+      - { $ref: "#/components/parameters/ChannelId" }
+    get:
+      tags: [Channels]
+      summary: One channel
+      operationId: getChannel
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Channel" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Channels]
+      summary: Rename a group or change its avatar
+      description: Owner and admins of a group only. DMs cannot be renamed.
+      operationId: updateChannel
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateChannelRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Channel" }
+        "400": { $ref: "#/components/responses/Validation" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/channels/{channel_id}/members:
+    parameters:
+      - { $ref: "#/components/parameters/ChannelId" }
+    get:
+      tags: [Members]
+      summary: Members of a channel
+      operationId: listMembers
+      parameters:
+        - { $ref: "#/components/parameters/Cursor" }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/MemberPage" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Members]
+      summary: Add members to a group
+      description: Owner and admins only. Users already in the group are ignored.
+      operationId: addMembers
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_ids]
+              properties:
+                user_ids:
+                  description: External ids.
+                  type: array
+                  minItems: 1
+                  maxItems: 50
+                  items: { type: string }
+      responses:
+        "200":
+          description: The channel after the change
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Channel" }
+        "400": { $ref: "#/components/responses/Validation" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/channels/{channel_id}/members/{user_id}:
+    parameters:
+      - { $ref: "#/components/parameters/ChannelId" }
+      - name: user_id
+        in: path
+        required: true
+        description: External id, or `me` to leave the group.
+        schema: { type: string }
+    delete:
+      tags: [Members]
+      summary: Remove a member, or leave with `me`
+      description: Removing others needs owner or admin. The owner leaving hands ownership to the oldest admin, else the oldest member.
+      operationId: removeMember
+      responses:
+        "204": { description: Removed }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/channels/{channel_id}/messages:
+    parameters:
+      - { $ref: "#/components/parameters/ChannelId" }
+    get:
+      tags: [Messages]
+      summary: Message history, newest first
+      description: Scroll back with `before_seq` = the smallest `seq` you hold. Without it, returns the latest messages.
+      operationId: listMessages
+      parameters:
+        - name: before_seq
+          in: query
+          schema: { type: integer, format: int64, minimum: 1 }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [messages, has_more]
+                properties:
+                  messages:
+                    type: array
+                    items: { $ref: "#/components/schemas/Message" }
+                  has_more: { type: boolean }
+        "404": { $ref: "#/components/responses/NotFound" }
+    post:
+      tags: [Messages]
+      summary: Send a message (REST fallback; the SDK normally sends over WebSocket)
+      description: |
+        Idempotent on `client_msg_id`: sending the same id again returns the stored message with `200`
+        instead of creating a second one.
+      operationId: sendMessage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/SendMessageRequest" }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Message" }
+        "200":
+          description: Already sent with this client_msg_id
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Message" }
+        "400": { $ref: "#/components/responses/Validation" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/channels/{channel_id}/sync:
+    parameters:
+      - { $ref: "#/components/parameters/ChannelId" }
+    get:
+      tags: [Messages]
+      summary: Changes since a cursor, oldest first
+      description: |
+        Returns messages with `rev_seq > since_rev` ordered by `rev_seq`, including edited, deleted (tombstones) and
+        re-reacted ones. Call again with `next_rev` while `has_more` is true. A client that has never synced a
+        channel should use history instead.
+      operationId: syncChannel
+      parameters:
+        - name: since_rev
+          in: query
+          required: true
+          schema: { type: integer, format: int64, minimum: 0 }
+        - { $ref: "#/components/parameters/Limit" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/SyncPage" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/channels/{channel_id}/read:
+    parameters:
+      - { $ref: "#/components/parameters/ChannelId" }
+    post:
+      tags: [Messages]
+      summary: Mark the channel read up to a seq
+      description: Moving backwards is ignored. Other members receive `read.updated`.
+      operationId: markRead
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [seq]
+              properties:
+                seq: { type: integer, format: int64, minimum: 0 }
+      responses:
+        "204": { description: Saved }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/messages/{message_id}:
+    parameters:
+      - { $ref: "#/components/parameters/MessageId" }
+    patch:
+      tags: [Messages]
+      summary: Edit the text of your own message
+      operationId: editMessage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text: { type: string, minLength: 1, maxLength: 4000 }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Message" }
+        "400": { $ref: "#/components/responses/Validation" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Messages]
+      summary: Delete a message
+      description: The sender, or an owner/admin of the group. Leaves a tombstone (`deleted_at` set, content removed).
+      operationId: deleteMessage
+      responses:
+        "204": { description: Deleted }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/messages/{message_id}/reactions/{emoji}:
+    parameters:
+      - { $ref: "#/components/parameters/MessageId" }
+      - name: emoji
+        in: path
+        required: true
+        description: URL-encoded emoji, e.g. `%F0%9F%91%8D` for 👍.
+        schema: { type: string, maxLength: 64 }
+    put:
+      tags: [Reactions]
+      summary: Add a reaction (idempotent)
+      operationId: addReaction
+      responses:
+        "200":
+          description: The message with updated reactions
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Message" }
+        "400": { $ref: "#/components/responses/Validation" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Reactions]
+      summary: Remove your reaction (idempotent)
+      operationId: removeReaction
+      responses:
+        "200":
+          description: The message with updated reactions
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Message" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/attachments:
+    post:
+      tags: [Attachments]
+      summary: Start an upload
+      description: |
+        Returns a presigned `PUT` URL valid for 15 minutes. Upload the bytes there directly with the same
+        `Content-Type`, then call `complete`. Uploads never completed are deleted after 24 hours.
+      operationId: createAttachment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mime, size]
+              properties:
+                mime: { type: string, example: image/jpeg }
+                size: { type: integer, format: int64, minimum: 1 }
+                file_name: { type: string, maxLength: 255 }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [attachment, upload_url, upload_headers, expires_at]
+                properties:
+                  attachment: { $ref: "#/components/schemas/Attachment" }
+                  upload_url: { type: string, format: uri }
+                  upload_headers:
+                    type: object
+                    additionalProperties: { type: string }
+                  expires_at: { type: string, format: date-time }
+        "400": { $ref: "#/components/responses/Validation" }
+        "413": { $ref: "#/components/responses/PayloadTooLarge" }
+        "429": { $ref: "#/components/responses/RateLimited" }
+
+  /v1/attachments/{attachment_id}/complete:
+    parameters:
+      - name: attachment_id
+        in: path
+        required: true
+        schema: { type: string, format: uuid }
+    post:
+      tags: [Attachments]
+      summary: Confirm the upload finished
+      description: |
+        The server checks the object exists with the declared size. Images and videos then get a thumbnail and
+        blurhash in the background (`status` goes from `processing` to `ready`, announced with
+        `message.updated` on messages that use it). Other files are `ready` at once.
+      operationId: completeAttachment
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Attachment" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+
+  /v1/devices:
+    post:
+      tags: [Devices]
+      summary: Register a push token for the authenticated user
+      description: A token registered by another user of the same tenant moves to this user (shared device, account switch).
+      operationId: registerDevice
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [platform, push_token]
+              properties:
+                platform: { type: string, enum: [android, web] }
+                push_token: { type: string, maxLength: 4096 }
+      responses:
+        "204": { description: Registered }
+        "400": { $ref: "#/components/responses/Validation" }
+
+  /v1/devices/{push_token}:
+    delete:
+      tags: [Devices]
+      summary: Unregister a push token (call on logout)
+      operationId: unregisterDevice
+      parameters:
+        - name: push_token
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        "204": { description: Removed (also when it did not exist) }
+
+  # ---------------------------------------------------------------- server API
+  /v1/server/users/{external_id}:
+    parameters:
+      - { $ref: "#/components/parameters/ExternalId" }
+    put:
+      tags: [Server Users]
+      summary: Create or update a user
+      security:
+        - apiKey: []
+          serverToken: []
+      operationId: upsertUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpsertUserRequest" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "400": { $ref: "#/components/responses/Validation" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+    delete:
+      tags: [Server Users]
+      summary: Delete a user
+      description: |
+        Anonymises the user (name and avatar removed, `deleted` true), removes their devices and memberships.
+        Their messages stay, shown with the anonymised author, so conversations keep their shape. Idempotent.
+      security:
+        - apiKey: []
+          serverToken: []
+      operationId: deleteUser
+      responses:
+        "204": { description: Deleted }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  /v1/server/channels/dm:
+    post:
+      tags: [Server Channels]
+      summary: Get or create the DM between two users
+      description: Both users must exist (upsert them first). A frozen DM is returned as it is, still frozen.
+      security:
+        - apiKey: []
+          serverToken: []
+      operationId: serverGetOrCreateDM
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_a, user_b]
+              properties:
+                user_a: { type: string, description: External id }
+                user_b: { type: string, description: External id }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ServerChannel" }
+        "200":
+          description: Already existed
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ServerChannel" }
+        "400": { $ref: "#/components/responses/Validation" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/server/channels:
+    post:
+      tags: [Server Channels]
+      summary: Create a group
+      security:
+        - apiKey: []
+          serverToken: []
+      operationId: serverCreateGroup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [created_by, name, member_ids]
+              properties:
+                created_by: { type: string, description: "External id, becomes owner" }
+                name: { type: string, minLength: 1, maxLength: 100 }
+                avatar_url: { type: string, format: uri }
+                member_ids:
+                  type: array
+                  maxItems: 255
+                  items: { type: string }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ServerChannel" }
+        "400": { $ref: "#/components/responses/Validation" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/server/channels/{channel_id}/members:
+    parameters:
+      - { $ref: "#/components/parameters/ChannelId" }
+    post:
+      tags: [Server Channels]
+      summary: Add members to a group
+      security:
+        - apiKey: []
+          serverToken: []
+      operationId: serverAddMembers
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_ids]
+              properties:
+                user_ids:
+                  type: array
+                  minItems: 1
+                  maxItems: 50
+                  items: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ServerChannel" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/server/channels/{channel_id}/members/{external_id}:
+    parameters:
+      - { $ref: "#/components/parameters/ChannelId" }
+      - { $ref: "#/components/parameters/ExternalId" }
+    delete:
+      tags: [Server Channels]
+      summary: Remove a member from a group
+      security:
+        - apiKey: []
+          serverToken: []
+      operationId: serverRemoveMember
+      responses:
+        "204": { description: Removed }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/server/channels/{channel_id}/freeze:
+    parameters:
+      - { $ref: "#/components/parameters/ChannelId" }
+    post:
+      tags: [Server Channels]
+      summary: Freeze a channel (read-only), e.g. after a block
+      security:
+        - apiKey: []
+          serverToken: []
+      operationId: serverFreezeChannel
+      responses:
+        "204": { description: Frozen }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Server Channels]
+      summary: Unfreeze a channel
+      security:
+        - apiKey: []
+          serverToken: []
+      operationId: serverUnfreezeChannel
+      responses:
+        "204": { description: Unfrozen }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /v1/server/channels/{channel_id}/messages:
+    parameters:
+      - { $ref: "#/components/parameters/ChannelId" }
+    post:
+      tags: [Server Channels]
+      summary: Post a system message
+      security:
+        - apiKey: []
+          serverToken: []
+      operationId: serverSendSystemMessage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [text]
+              properties:
+                text: { type: string, minLength: 1, maxLength: 4000 }
+                metadata: { type: object, additionalProperties: true }
+      responses:
+        "201":
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Message" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+components:
+  securitySchemes:
+    apiKey:
+      type: apiKey
+      in: header
+      name: X-Api-Key
+      description: Public key of the tenant app. Safe to ship in apps.
+    userToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: "HS256 JWT signed by the tenant backend with api_secret. Claims: sub (external user id), iat, exp."
+    serverToken:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: "HS256 JWT signed with api_secret. Claims: server=true, iat, exp (at most 5 minutes)."
+
+  parameters:
+    ChannelId:
+      name: channel_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    MessageId:
+      name: message_id
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    ExternalId:
+      name: external_id
+      in: path
+      required: true
+      description: The tenant's own user id.
+      schema: { type: string, minLength: 1, maxLength: 255 }
+    Cursor:
+      name: cursor
+      in: query
+      description: Opaque value from `next_cursor` of the previous page.
+      schema: { type: string }
+    Limit:
+      name: limit
+      in: query
+      schema: { type: integer, minimum: 1, maximum: 100, default: 30 }
+
+  responses:
+    Validation:
+      description: Invalid input (`bad_request` or `validation_failed`, field errors in `details.fields`)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Unauthenticated:
+      description: Missing or invalid credentials (`unauthenticated`, `token_expired`)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Forbidden:
+      description: Authenticated but not allowed (`forbidden`, `channel_frozen`)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    NotFound:
+      description: Does not exist, or the caller is not a member (`not_found`)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    Conflict:
+      description: State conflict (`conflict`)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    PayloadTooLarge:
+      description: Over a size limit (`payload_too_large`)
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+    RateLimited:
+      description: Too many requests (`rate_limited`); `Retry-After` header in seconds
+      headers:
+        Retry-After:
+          schema: { type: integer }
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              description: Stable machine-readable code. The full list is in spec/events.md, section Error codes.
+              enum:
+                - bad_request
+                - validation_failed
+                - unauthenticated
+                - token_expired
+                - forbidden
+                - channel_frozen
+                - not_found
+                - method_not_allowed
+                - conflict
+                - payload_too_large
+                - rate_limited
+                - internal_error
+                - service_unavailable
+            message: { type: string, description: "Human-readable English text, may change." }
+            request_id: { type: string }
+            details:
+              type: object
+              additionalProperties: true
+              description: 'For validation_failed: {"fields": {"<field>": "<reason>"}}.'
+
+    User:
+      type: object
+      required: [id, external_id, name, deleted]
+      properties:
+        id: { type: string, format: uuid }
+        external_id: { type: string }
+        name: { type: string }
+        avatar_url: { type: [string, "null"], format: uri }
+        metadata: { type: object, additionalProperties: true }
+        deleted: { type: boolean }
+
+    UpsertUserRequest:
+      type: object
+      required: [name]
+      properties:
+        name: { type: string, maxLength: 100 }
+        avatar_url: { type: [string, "null"], format: uri }
+        metadata:
+          type: object
+          additionalProperties: true
+          description: Free-form, at most 4 KB as JSON. Visible to other users.
+
+    Membership:
+      type: object
+      description: The authenticated user's own membership in a channel.
+      required: [role, last_read_seq, unread_count]
+      properties:
+        role: { type: string, enum: [owner, admin, member] }
+        last_read_seq: { type: integer, format: int64 }
+        unread_count:
+          type: integer
+          description: Messages from others after last_read_seq. Capped at 100 (show "99+").
+        muted_until: { type: [string, "null"], format: date-time }
+        joined_at: { type: string, format: date-time }
+        left_at: { type: [string, "null"], format: date-time }
+
+    Member:
+      type: object
+      required: [user, role, joined_at]
+      properties:
+        user: { $ref: "#/components/schemas/User" }
+        role: { type: string, enum: [owner, admin, member] }
+        last_read_seq: { type: integer, format: int64, description: For read receipts. }
+        joined_at: { type: string, format: date-time }
+
+    Channel:
+      type: object
+      required: [id, type, member_count, last_seq, last_message_seq, frozen, created_at, updated_at, membership]
+      properties:
+        id: { type: string, format: uuid }
+        type: { type: string, enum: [dm, group] }
+        name: { type: [string, "null"], description: Groups only. Clients show the other member's name for DMs. }
+        avatar_url: { type: [string, "null"], format: uri }
+        member_count: { type: integer }
+        dm_peer:
+          description: DMs only, the other member.
+          oneOf:
+            - $ref: "#/components/schemas/User"
+            - type: "null"
+        last_seq: { type: integer, format: int64, description: Latest value of the channel counter. }
+        last_message_seq: { type: integer, format: int64 }
+        last_message:
+          oneOf:
+            - $ref: "#/components/schemas/Message"
+            - type: "null"
+        last_message_at: { type: [string, "null"], format: date-time }
+        frozen: { type: boolean }
+        created_at: { type: string, format: date-time }
+        updated_at: { type: string, format: date-time }
+        membership: { $ref: "#/components/schemas/Membership" }
+
+    ServerChannel:
+      description: Channel as seen by the server API (no per-user membership).
+      type: object
+      required: [id, type, member_count, frozen, created_at]
+      properties:
+        id: { type: string, format: uuid }
+        type: { type: string, enum: [dm, group] }
+        name: { type: [string, "null"] }
+        avatar_url: { type: [string, "null"], format: uri }
+        member_count: { type: integer }
+        member_ids:
+          type: array
+          items: { type: string }
+          description: External ids.
+        frozen: { type: boolean }
+        created_at: { type: string, format: date-time }
+
+    CreateChannelRequest:
+      oneOf:
+        - type: object
+          required: [type, user_id]
+          properties:
+            type: { const: dm }
+            user_id: { type: string, description: External id of the other user }
+        - type: object
+          required: [type, name, member_ids]
+          properties:
+            type: { const: group }
+            name: { type: string, minLength: 1, maxLength: 100 }
+            avatar_url: { type: string, format: uri }
+            member_ids:
+              type: array
+              maxItems: 255
+              items: { type: string }
+      discriminator:
+        propertyName: type
+
+    UpdateChannelRequest:
+      type: object
+      minProperties: 1
+      properties:
+        name: { type: string, minLength: 1, maxLength: 100 }
+        avatar_url: { type: [string, "null"], format: uri }
+
+    ChannelPage:
+      type: object
+      required: [channels, next_cursor]
+      properties:
+        channels:
+          type: array
+          items: { $ref: "#/components/schemas/Channel" }
+        next_cursor: { type: [string, "null"] }
+
+    MemberPage:
+      type: object
+      required: [members, next_cursor]
+      properties:
+        members:
+          type: array
+          items: { $ref: "#/components/schemas/Member" }
+        next_cursor: { type: [string, "null"] }
+
+    SendMessageRequest:
+      type: object
+      required: [client_msg_id]
+      description: At least one of text or attachment_ids.
+      properties:
+        client_msg_id: { type: string, minLength: 1, maxLength: 64, description: "Unique per sender and channel, UUID recommended." }
+        text: { type: string, maxLength: 4000 }
+        attachment_ids:
+          type: array
+          maxItems: 10
+          items: { type: string, format: uuid }
+        reply_to_id: { type: string, format: uuid }
+
+    Message:
+      type: object
+      required: [id, channel_id, seq, rev_seq, type, created_at, reactions]
+      properties:
+        id: { type: string, format: uuid }
+        channel_id: { type: string, format: uuid }
+        seq: { type: integer, format: int64 }
+        rev_seq: { type: integer, format: int64 }
+        client_msg_id: { type: [string, "null"] }
+        type: { type: string, enum: [text, media, system] }
+        sender:
+          description: null for system messages.
+          oneOf:
+            - $ref: "#/components/schemas/User"
+            - type: "null"
+        text: { type: [string, "null"], description: null when deleted. }
+        attachments:
+          type: array
+          items: { $ref: "#/components/schemas/Attachment" }
+        reply_to:
+          description: Short preview of the replied message.
+          oneOf:
+            - $ref: "#/components/schemas/MessagePreview"
+            - type: "null"
+        reactions: { $ref: "#/components/schemas/ReactionSummary" }
+        metadata: { type: object, additionalProperties: true }
+        created_at: { type: string, format: date-time }
+        edited_at: { type: [string, "null"], format: date-time }
+        deleted_at: { type: [string, "null"], format: date-time }
+
+    MessagePreview:
+      type: object
+      required: [id, seq]
+      properties:
+        id: { type: string, format: uuid }
+        seq: { type: integer, format: int64 }
+        sender_id: { type: [string, "null"], description: External id }
+        text: { type: [string, "null"], maxLength: 200 }
+        has_attachments: { type: boolean }
+        deleted: { type: boolean }
+
+    ReactionSummary:
+      type: object
+      required: [counts, mine]
+      properties:
+        counts:
+          type: object
+          additionalProperties: { type: integer }
+          example: { "👍": 3, "😂": 1 }
+        mine:
+          type: array
+          items: { type: string }
+          example: ["👍"]
+
+    Attachment:
+      type: object
+      required: [id, kind, mime, size, status]
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [image, video, file] }
+        mime: { type: string }
+        size: { type: integer, format: int64 }
+        file_name: { type: [string, "null"] }
+        width: { type: [integer, "null"] }
+        height: { type: [integer, "null"] }
+        duration_ms: { type: [integer, "null"] }
+        blurhash: { type: [string, "null"] }
+        status: { type: string, enum: [pending, processing, ready, failed] }
+        url:
+          type: [string, "null"]
+          format: uri
+          description: Presigned download URL, valid about 1 hour. null until ready. Refetch the message when expired.
+        thumbnail_url: { type: [string, "null"], format: uri }
+
+    SyncPage:
+      type: object
+      required: [messages, next_rev, has_more, channel_last_seq]
+      properties:
+        messages:
+          type: array
+          items: { $ref: "#/components/schemas/Message" }
+        next_rev:
+          type: integer
+          format: int64
+          description: Pass as since_rev to continue; store it as the channel cursor when has_more is false.
+        has_more: { type: boolean }
+        channel_last_seq: { type: integer, format: int64 }

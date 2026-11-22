@@ -1,0 +1,17 @@
+.DS_Store
+.idea/
+.vscode/
+*.log
+
+# server
+server/bin/
+server/.env
+
+# sdk-js
+node_modules/
+dist/
+
+# sdk-android
+.gradle/
+build/
+local.properties

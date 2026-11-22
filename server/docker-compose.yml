@@ -1,0 +1,65 @@
+# Local dependencies for development: `make deps-up`, then `make migrate` and `make run-api` / `make run-worker`.
+# Host ports are shifted (5xxxx) so they do not clash with other projects running locally.
+# pgbouncer in transaction mode is included on purpose: dev and prod connect through it, so local runs must too.
+name: marpokat
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: marpokat
+      POSTGRES_USER: marpokat
+      POSTGRES_PASSWORD: marpokat
+    ports: ["55432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U marpokat -d marpokat"]
+      interval: 2s
+      retries: 30
+
+  pgbouncer:
+    image: edoburu/pgbouncer:v1.24.1-p1
+    environment:
+      DB_HOST: postgres
+      DB_USER: marpokat
+      DB_PASSWORD: marpokat
+      DB_NAME: marpokat
+      POOL_MODE: transaction
+      AUTH_TYPE: scram-sha-256
+    ports: ["56432:5432"]
+    depends_on:
+      postgres: { condition: service_healthy }
+
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--requirepass", "marpokat"]
+    ports: ["56379:6379"]
+
+  rabbitmq:
+    image: rabbitmq:4-management-alpine
+    environment:
+      RABBITMQ_DEFAULT_USER: marpokat
+      RABBITMQ_DEFAULT_PASS: marpokat
+      RABBITMQ_DEFAULT_VHOST: /marpokat-dev
+    ports: ["55672:5672", "55673:15672"]
+
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: marpokat
+      MINIO_ROOT_PASSWORD: marpokat-secret
+    ports: ["59000:9000", "59001:9001"]
+    volumes: [miniodata:/data]
+
+  # creates the bucket once; the app never creates buckets itself (see storage.Open)
+  minio-init:
+    image: minio/mc:RELEASE.2025-04-16T18-13-26Z
+    depends_on: [minio]
+    entrypoint: >
+      sh -c "until mc alias set local http://minio:9000 marpokat marpokat-secret; do sleep 1; done &&
+             mc mb --ignore-existing local/marpokat-media-dev"
+
+volumes:
+  pgdata:
+  miniodata:
