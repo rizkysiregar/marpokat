@@ -7,7 +7,7 @@ yang sama dengan tenant lain nanti, tanpa jalan pintas khusus.
 Dokumen ini acuan utama: keputusan arsitektur, tech stack, desain data dan protokol, pekerjaan infra, integrasi Narrativ,
 serta urutan milestone beserta progress tiap item.
 
-- **Status:** M2 berjalan: kode Marpokat dan Narrativ selesai dan teruji; menunggu build Marpokat M2 di dev dan merge narrativ-backend#82
+- **Status:** M2 selesai (2026-11-22): DM dan group teruji dengan dua akun di dev. Berikutnya M3 (realtime)
 - **Dibuat:** 2026-11-22
 - **Target MVP:** chat service yang robust untuk 100–1000 user aktif. DM, group, media, reaction. Belum untuk dijual
 - **Repo terkait:** `marpokat` (monorepo ini), `narrativ-backend`, `narrativ-android`, `narrativ-web-client`, `homelabs-gitops`
@@ -25,7 +25,7 @@ tidak dihapus. Keputusan baru ditambahkan ke bagian 2 dengan nomor berikutnya, d
 | --------- | ---------------------------------------------------------- | -------- |
 | M0        | Fondasi: repo, spec, skema, skeleton Go, CI/CD, deploy dev | ✅ Selesai |
 | M1        | Tenant dan autentikasi                                     | ✅ Selesai |
-| M2        | Messaging inti (DM, group, history, sync, outbox)          | 🟡 Berjalan |
+| M2        | Messaging inti (DM, group, history, sync, outbox)          | ✅ Selesai |
 | M3        | Realtime gateway (WebSocket, fan-out, typing, read)        | ⚪ Belum |
 | M4        | Worker, push notification, retry dan DLQ                   | ⚪ Belum |
 | M5        | Media dan reaction, edit/hapus pesan                       | ⚪ Belum |
@@ -384,7 +384,7 @@ lewat FCM memakai kredensial tenant. Payload: `channel_id`, `message_id`, nama p
 | NV-02 | `MarpokatClient` di backend (server JWT, upsert user; buat DM/group dan freeze menyusul di M2/M5), config `APP_MARPOKAT_*` di configmap + secret | narrativ-backend | M1 | [x] | narrativ-backend#80, gitops 090b2af |
 | NV-03 | `POST /api/v1/chat/token`: upsert user lalu user token Marpokat + api key + base URL. Contract test jjwt ↔ Go lolos                     | narrativ-backend         | M1         | [x]    | narrativ-backend#80 |
 | NV-04 | ~~Upsert user saat register/update profil + backfill~~ Diganti D32: upsert saat token dan saat DM dibuka. Hook update profil menyusul bila perlu | narrativ-backend | M2 | [x] | lewat NV-03 dan NV-05 |
-| NV-05 | `POST /api/v1/chat/dm/{userId}`: cek diri sendiri dan blokir (user di sisi blokir dianggap tidak ada), lalu buat atau ambil DM di Marpokat | narrativ-backend | M2 | [ ] | narrativ-backend#82 |
+| NV-05 | `POST /api/v1/chat/dm/{userId}`: cek diri sendiri dan blokir (user di sisi blokir dianggap tidak ada), lalu buat atau ambil DM di Marpokat | narrativ-backend | M2 | [x] | narrativ-backend#82 |
 | NV-06 | Saat user memblokir user lain: freeze channel DM keduanya                                                                              | narrativ-backend         | M5         | [ ]    |     |
 | NV-07 | Kredensial FCM project Firebase Narrativ (dev, lalu prod) disimpan di tenant                                                           | marpokat CLI             | M4         | [ ]    |     |
 | NV-08 | Layar chat web: daftar channel, ruang chat, kirim media, reaction, unread badge, tombol "Kirim pesan" di profil                        | narrativ-web-client      | M6         | [ ]    |     |
@@ -425,7 +425,7 @@ lewat FCM memakai kredensial tenant. Payload: `channel_id`, `message_id`, nama p
 - [x] NV-02, NV-03 (narrativ-backend#80)
 - [x] **Selesai jika:** Narrativ dev bisa upsert user dan memberi token, dan token itu bisa memanggil `GET /me`. Diuji end-to-end di dev (login → `POST /chat/token` → `GET /v1/me` 200; api key salah → 401)
 
-### M2: Messaging inti 🟡
+### M2: Messaging inti ✅
 
 - [x] Channel: DM (server API, `dm_key`, satu per pasangan, aman saat dibuat bersamaan), group (client dan server API), detail, ubah nama/avatar, tambah/keluarkan/keluar member, owner pindah otomatis saat keluar, group berakhir saat anggota terakhir keluar, freeze/unfreeze. Peran owner/admin/member (D37)
 - [x] `GET /channels`: urut aktivitas terbaru, `last_message`, `dm_peer`, unread, cursor paging, `updated_since` (termasuk channel yang ditinggalkan)
@@ -435,8 +435,8 @@ lewat FCM memakai kredensial tenant. Payload: `channel_id`, `message_id`, nama p
 - [x] `POST /channels/{id}/read` (hanya maju, dijepit sampai akhir channel) dan perhitungan unread (D35)
 - [x] Integration test (testcontainers, `-race` hijau): DM, unread, group dan izin, riwayat pengumuman, paging dan `updated_since`, isolasi tenant (13 operasi lintas tenant semuanya 404), pengiriman paralel (seq 1..N tanpa celah, satu pesan per `client_msg_id`, satu DM per pasangan). Diuji juga lewat pgbouncer lokal
 - [x] NV-04 (disederhanakan, D32), NV-05 (narrativ-backend#82; contract test Java ↔ Go lolos)
-- [ ] Build M2 live di dev dan narrativ-backend#82 di-merge
-- [ ] **Selesai jika:** dua user Narrativ dev bisa DM dan group lewat REST, history dan sync benar, test hijau. Test hijau sudah, tinggal uji dua akun dev setelah deploy
+- [x] Build M2 live di dev (`eadceb835267`) dan narrativ-backend#82 di-merge (`d82154d6ab86`)
+- [x] **Selesai jika:** dua user Narrativ dev bisa DM dan group lewat REST, history dan sync benar, test hijau. Diuji end-to-end di dev dengan dua akun (27 pemeriksaan lolos): buka DM dari dua sisi, kirim dan kirim ulang, unread, history, sync, read, balas, token palsu ditolak, group (buat, ganti nama, izin member, owner pindah saat keluar, group berakhir)
 
 ### M3: Realtime ⚪
 
@@ -527,6 +527,7 @@ kemungkinan untuk semuanya.
 - **Logika client SDK** (reconnect, deteksi celah, antrean pending) paling rawan bug. Alokasikan test lebih banyak di SDK
   daripada di server.
 - **WebSocket di belakang Cloudflare.** Ping 25 detik dan timeout ingress panjang wajib, kalau tidak koneksi putus diam-diam.
+- **Cloudflare menolak User-Agent bawaan beberapa library** (kode 1010, mis. `Python-urllib`). Skrip tes memakai User-Agent sendiri. Browser, OkHttp, dan klien Java Narrativ tidak terpengaruh.
 - **Redis bersama prod Narrativ (D20).** Semua key dan channel wajib berawalan `marpokat:`. Pantau memori Redis.
 - **Data pribadi (UU PDP).** Hapus akun di tenant harus menghapus/anonimkan data di Marpokat (NV-10). Tentukan retensi
   pesan sebelum prod.
@@ -542,3 +543,4 @@ kemungkinan untuk semuanya.
 | 2026-11-22 | M0 selesai: infra VM dev, repo, Jenkins, Argo CD; dev live                     |
 | 2026-11-22 | M1 selesai: tenant, auth, user API; integrasi Narrativ dev teruji end-to-end   |
 | 2026-11-22 | M2 dikerjakan: D32–D38, channel/pesan/sync/unread, NV-04/05                    |
+| 2026-11-22 | M2 selesai: diuji dengan dua akun di dev                                       |
