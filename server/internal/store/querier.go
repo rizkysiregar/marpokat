@@ -26,6 +26,7 @@ type Querier interface {
 	GetChannel(ctx context.Context, arg GetChannelParams) (Channel, error)
 	GetChannelByDMKey(ctx context.Context, arg GetChannelByDMKeyParams) (Channel, error)
 	GetMember(ctx context.Context, arg GetMemberParams) (GetMemberRow, error)
+	GetMemberDetails(ctx context.Context, arg GetMemberDetailsParams) (GetMemberDetailsRow, error)
 	GetMessageByClientID(ctx context.Context, arg GetMessageByClientIDParams) (MessageDetail, error)
 	GetMessageBySeq(ctx context.Context, arg GetMessageBySeqParams) (MessageDetail, error)
 	GetTenantByAPIKey(ctx context.Context, apiKey string) (Tenant, error)
@@ -40,6 +41,12 @@ type Querier interface {
 	InsertMessage(ctx context.Context, arg InsertMessageParams) error
 	InsertOutbox(ctx context.Context, arg InsertOutboxParams) error
 	LeaveAllChannels(ctx context.Context, arg LeaveAllChannelsParams) error
+	// Who receives events of a channel: its active members.
+	ListActiveMemberIDs(ctx context.Context, arg ListActiveMemberIDsParams) ([]uuid.UUID, error)
+	// Everyone who shares an active channel with the user: the audience of their presence.
+	ListCoMemberIDs(ctx context.Context, arg ListCoMemberIDsParams) ([]uuid.UUID, error)
+	// Of the given external ids, those who share an active channel with the user (presence is only for them).
+	ListCoMembersByExternalIDs(ctx context.Context, arg ListCoMembersByExternalIDsParams) ([]ListCoMembersByExternalIDsRow, error)
 	// The other member of each given DM, as seen by user_id. channel_ids is a comma separated list: with the simple
 	// protocol (pgbouncer) the driver cannot encode a uuid array, and a string it can.
 	ListDMPeers(ctx context.Context, arg ListDMPeersParams) ([]ListDMPeersRow, error)

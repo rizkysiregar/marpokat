@@ -6,7 +6,9 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
@@ -76,5 +78,64 @@ func TestNotFoundBody(t *testing.T) {
 	_ = json.Unmarshal(rec.Body.Bytes(), &body)
 	if rec.Code != http.StatusNotFound || body.Error.Code != CodeNotFound {
 		t.Fatalf("got %d %+v", rec.Code, body)
+	}
+}
+
+func TestCORS(t *testing.T) {
+	var reached bool
+	h := WithCORS()(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { reached = true; w.WriteHeader(http.StatusOK) }))
+
+	// preflight: answered here, before authentication, and the real handler is never called
+	req := httptest.NewRequest(http.MethodOptions, "/v1/channels", nil)
+	req.Header.Set("Origin", "https://app.example.com")
+	req.Header.Set("Access-Control-Request-Method", "POST")
+	req.Header.Set("Access-Control-Request-Headers", "authorization, x-api-key, content-type")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent || reached {
+		t.Fatalf("preflight: status %d, handler reached %v", rec.Code, reached)
+	}
+	hdr := rec.Header()
+	if hdr.Get("Access-Control-Allow-Origin") != "*" || hdr.Get("Access-Control-Allow-Credentials") != "" {
+		t.Fatalf("origin policy: %v", hdr)
+	}
+	for _, want := range []string{"Authorization", "X-Api-Key", "Content-Type"} {
+		if !strings.Contains(hdr.Get("Access-Control-Allow-Headers"), want) {
+			t.Errorf("Allow-Headers %q misses %s", hdr.Get("Access-Control-Allow-Headers"), want)
+		}
+	}
+	if !strings.Contains(hdr.Get("Access-Control-Allow-Methods"), "PATCH") {
+		t.Errorf("Allow-Methods %q misses PATCH", hdr.Get("Access-Control-Allow-Methods"))
+	}
+
+	// a real cross-origin request is passed on, with the header that lets the page read the answer
+	reached = false
+	req = httptest.NewRequest(http.MethodGet, "/v1/me", nil)
+	req.Header.Set("Origin", "https://app.example.com")
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if !reached || rec.Header().Get("Access-Control-Allow-Origin") != "*" || !strings.Contains(rec.Header().Get("Access-Control-Expose-Headers"), "Retry-After") {
+		t.Fatalf("simple request: reached=%v headers=%v", reached, rec.Header())
+	}
+
+	// no Origin, no CORS headers (server to server)
+	reached = false
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v1/me", nil))
+	if !reached || rec.Header().Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("request without Origin: reached=%v headers=%v", reached, rec.Header())
+	}
+}
+
+func TestWriteErrSetsRetryAfter(t *testing.T) {
+	rec := httptest.NewRecorder()
+	WriteErr(rec, httptest.NewRequest(http.MethodPost, "/", nil), quietLogger(), ErrRateLimited(1500*time.Millisecond, "slow down"))
+	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") != "2" {
+		t.Fatalf("status %d, Retry-After %q (1.5s rounds up to 2)", rec.Code, rec.Header().Get("Retry-After"))
+	}
+	var body ErrorBody
+	_ = json.Unmarshal(rec.Body.Bytes(), &body)
+	if body.Error.Code != CodeRateLimited || body.Error.Details["retry_after_ms"] != float64(1500) {
+		t.Fatalf("body: %+v", body)
 	}
 }

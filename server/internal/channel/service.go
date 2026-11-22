@@ -32,12 +32,31 @@ type Actor = uuid.NullUUID
 // UserActor is the actor for a user.
 func UserActor(id uuid.UUID) Actor { return uuid.NullUUID{UUID: id, Valid: true} }
 
+// Notifier tells connected clients about a change after it was committed (PLAN M3). Delivery is best effort, so
+// the calls return nothing: a client that misses an event catches up with sync and updated_since.
+type Notifier interface {
+	// ChannelAdded: these users now have the channel (each is sent the channel as they see it).
+	ChannelAdded(ctx context.Context, tenantID, channelID uuid.UUID, userIDs []uuid.UUID)
+	// ChannelUpdated: the profile or frozen state changed, for every active member.
+	ChannelUpdated(ctx context.Context, tenantID, channelID uuid.UUID)
+	// ChannelRemoved: the user no longer has the channel; reason is "left" or "removed".
+	ChannelRemoved(ctx context.Context, tenantID, channelID, userID uuid.UUID, reason string)
+	MemberAdded(ctx context.Context, tenantID, channelID uuid.UUID, userIDs []uuid.UUID)
+	MemberRemoved(ctx context.Context, tenantID, channelID, userID uuid.UUID)
+	// SystemMessages: announcements of the change, by seq, for every active member.
+	SystemMessages(ctx context.Context, tenantID, channelID uuid.UUID, seqs ...int64)
+}
+
 type Service struct {
-	pool *pgxpool.Pool
-	q    store.Querier
+	pool     *pgxpool.Pool
+	q        store.Querier
+	notifier Notifier
 }
 
 func NewService(pool *pgxpool.Pool) *Service { return &Service{pool: pool, q: store.New(pool)} }
+
+// SetNotifier is called once while wiring, before the service takes requests.
+func (s *Service) SetNotifier(n Notifier) { s.notifier = n }
 
 // ResolveUsers maps external ids to users of the tenant, in the order given and without duplicates. Users that do
 // not exist (or were deleted) are a 404 naming them: the tenant backend must upsert them first.
@@ -116,6 +135,9 @@ func (s *Service) GetOrCreateDM(ctx context.Context, tenantID, a, b uuid.UUID) (
 	if err != nil {
 		return store.Channel{}, false, fmt.Errorf("channel: get or create dm: %w", err)
 	}
+	if created && s.notifier != nil {
+		s.notifier.ChannelAdded(ctx, tenantID, ch.ID, []uuid.UUID{a, b})
+	}
 	return ch, created, nil
 }
 
@@ -163,7 +185,7 @@ func (s *Service) CreateGroup(ctx context.Context, tenantID, creator uuid.UUID, 
 		if err != nil {
 			return err
 		}
-		if err := systemMessage(ctx, q, tenantID, ch.ID, map[string]any{"event": "channel.created", "actor_id": actorExt, "name": name}); err != nil {
+		if _, err := systemMessage(ctx, q, tenantID, ch.ID, map[string]any{"event": "channel.created", "actor_id": actorExt, "name": name}); err != nil {
 			return err
 		}
 		return outbox.Enqueue(ctx, q, tenantID, outbox.TopicChannelCreated,
@@ -171,6 +193,9 @@ func (s *Service) CreateGroup(ctx context.Context, tenantID, creator uuid.UUID, 
 	})
 	if err != nil {
 		return store.Channel{}, fmt.Errorf("channel: create group: %w", err)
+	}
+	if s.notifier != nil { // the channel carries the creation announcement as its last message
+		s.notifier.ChannelAdded(ctx, tenantID, ch.ID, append([]uuid.UUID{creator}, others...))
 	}
 	return ch, nil
 }
@@ -300,6 +325,7 @@ func (s *Service) Update(ctx context.Context, tenantID, actor, channelID uuid.UU
 	if err != nil {
 		return Channel{}, err
 	}
+	var announced []int64
 	err = pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		q := store.New(tx)
 		ch, err := lockGroup(ctx, q, tenantID, channelID, "direct messages have no name or avatar to change")
@@ -319,20 +345,28 @@ func (s *Service) Update(ctx context.Context, tenantID, actor, channelID uuid.UU
 			if err != nil {
 				return err
 			}
-			if err := systemMessage(ctx, q, tenantID, channelID, map[string]any{"event": "channel.renamed", "actor_id": actorExt, "name": *name}); err != nil {
+			appended, err := systemMessage(ctx, q, tenantID, channelID, map[string]any{"event": "channel.renamed", "actor_id": actorExt, "name": *name})
+			if err != nil {
 				return err
 			}
+			announced = append(announced, appended.Seq)
 		}
 		return outbox.Enqueue(ctx, q, tenantID, outbox.TopicChannelUpdated, map[string]any{"channel_id": channelID})
 	})
 	if err != nil {
 		return Channel{}, wrap(err, "update")
 	}
+	if s.notifier != nil {
+		s.notifier.ChannelUpdated(ctx, tenantID, channelID)
+		s.notifier.SystemMessages(ctx, tenantID, channelID, announced...)
+	}
 	return s.ForUser(ctx, tenantID, actor, channelID)
 }
 
 // AddMembers adds users to a group, skipping those already in it. Owner and admins only (or the tenant backend).
 func (s *Service) AddMembers(ctx context.Context, tenantID uuid.UUID, actor Actor, channelID uuid.UUID, users []store.User) error {
+	var added []uuid.UUID
+	var announced int64
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		q := store.New(tx)
 		ch, err := lockGroup(ctx, q, tenantID, channelID, "the members of a direct message cannot change")
@@ -342,7 +376,7 @@ func (s *Service) AddMembers(ctx context.Context, tenantID uuid.UUID, actor Acto
 		if err := requireManager(ctx, q, tenantID, channelID, actor); err != nil {
 			return err
 		}
-		var added []uuid.UUID
+		added = added[:0]
 		var addedExt []string
 		for _, u := range users {
 			n, err := q.AddMember(ctx, store.AddMemberParams{
@@ -373,17 +407,31 @@ func (s *Service) AddMembers(ctx context.Context, tenantID uuid.UUID, actor Acto
 		} else if ok {
 			meta["actor_id"] = actorExt
 		}
-		if err := systemMessage(ctx, q, tenantID, channelID, meta); err != nil {
+		appended, err := systemMessage(ctx, q, tenantID, channelID, meta)
+		if err != nil {
 			return err
 		}
+		announced = appended.Seq
 		return outbox.Enqueue(ctx, q, tenantID, outbox.TopicChannelMembersAdded, map[string]any{"channel_id": channelID, "user_ids": added})
 	})
-	return wrap(err, "add members")
+	if err != nil {
+		return wrap(err, "add members")
+	}
+	if s.notifier != nil && announced != 0 && len(added) > 0 {
+		// the new members first learn of the channel, then everyone learns of them
+		s.notifier.ChannelAdded(ctx, tenantID, channelID, added)
+		s.notifier.MemberAdded(ctx, tenantID, channelID, added)
+		s.notifier.SystemMessages(ctx, tenantID, channelID, announced)
+	}
+	return nil
 }
 
 // RemoveMember takes a member out of a group: a member leaves (actor is the target), or an owner/admin removes
 // someone, or the tenant backend does. The owner leaving hands ownership on; the last member leaving deletes the group.
 func (s *Service) RemoveMember(ctx context.Context, tenantID uuid.UUID, actor Actor, channelID, target uuid.UUID) error {
+	var reason string
+	var ended bool
+	var announced int64
 	err := pgx.BeginFunc(ctx, s.pool, func(tx pgx.Tx) error {
 		q := store.New(tx)
 		if _, err := lockGroup(ctx, q, tenantID, channelID, "the members of a direct message cannot change"); err != nil {
@@ -431,7 +479,7 @@ func (s *Service) RemoveMember(ctx context.Context, tenantID uuid.UUID, actor Ac
 		if _, err := q.RemoveMember(ctx, store.RemoveMemberParams{ChannelID: channelID, UserID: target, TenantID: tenantID}); err != nil {
 			return err
 		}
-		reason := "removed"
+		reason = "removed"
 		if self {
 			reason = "left"
 		}
@@ -440,6 +488,7 @@ func (s *Service) RemoveMember(ctx context.Context, tenantID uuid.UUID, actor Ac
 			return err
 		}
 		if count == 1 { // nobody is left
+			ended = true
 			return q.SoftDeleteChannel(ctx, store.SoftDeleteChannelParams{ID: channelID, TenantID: tenantID})
 		}
 		targetExt, err := externalID(ctx, q, tenantID, target)
@@ -454,9 +503,21 @@ func (s *Service) RemoveMember(ctx context.Context, tenantID uuid.UUID, actor Ac
 				meta["actor_id"] = actorExt
 			}
 		}
-		return systemMessage(ctx, q, tenantID, channelID, meta)
+		appended, err := systemMessage(ctx, q, tenantID, channelID, meta)
+		announced = appended.Seq
+		return err
 	})
-	return wrap(err, "remove member")
+	if err != nil {
+		return wrap(err, "remove member")
+	}
+	if s.notifier != nil {
+		s.notifier.ChannelRemoved(ctx, tenantID, channelID, target, reason)
+		if !ended {
+			s.notifier.MemberRemoved(ctx, tenantID, channelID, target)
+			s.notifier.SystemMessages(ctx, tenantID, channelID, announced)
+		}
+	}
+	return nil
 }
 
 // SetFrozen makes a channel read-only (or writable again). Only the tenant backend does this, e.g. after a block.
@@ -472,7 +533,13 @@ func (s *Service) SetFrozen(ctx context.Context, tenantID, channelID uuid.UUID, 
 		}
 		return outbox.Enqueue(ctx, q, tenantID, outbox.TopicChannelUpdated, map[string]any{"channel_id": channelID})
 	})
-	return wrap(err, "set frozen")
+	if err != nil {
+		return wrap(err, "set frozen")
+	}
+	if s.notifier != nil {
+		s.notifier.ChannelUpdated(ctx, tenantID, channelID)
+	}
+	return nil
 }
 
 // Members lists the active members of a channel the user belongs to, oldest member first.
@@ -569,11 +636,10 @@ func requireManager(ctx context.Context, q store.Querier, tenantID, channelID uu
 
 // systemMessage records what happened in a channel as a message without sender. The text stays empty: clients
 // word it themselves from metadata.event, in the language of their user.
-func systemMessage(ctx context.Context, q store.Querier, tenantID, channelID uuid.UUID, metadata map[string]any) error {
-	_, err := message.Append(ctx, q, message.AppendInput{
+func systemMessage(ctx context.Context, q store.Querier, tenantID, channelID uuid.UUID, metadata map[string]any) (message.Appended, error) {
+	return message.Append(ctx, q, message.AppendInput{
 		TenantID: tenantID, ChannelID: channelID, Type: message.TypeSystem, Metadata: metadata,
 	})
-	return err
 }
 
 func externalID(ctx context.Context, q store.Querier, tenantID, userID uuid.UUID) (string, error) {

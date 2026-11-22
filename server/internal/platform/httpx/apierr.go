@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -39,6 +40,13 @@ func ErrFrozen() *Error {
 	return NewError(http.StatusForbidden, CodeChannelFrozen, "this channel is frozen: it is read-only")
 }
 
+// ErrRateLimited is a 429 that tells the caller when to try again (header Retry-After and details.retry_after_ms).
+func ErrRateLimited(retryAfter time.Duration, format string, args ...any) *Error {
+	e := NewError(http.StatusTooManyRequests, CodeRateLimited, format, args...)
+	e.Details = map[string]any{"retry_after_ms": max(retryAfter.Milliseconds(), 1)}
+	return e
+}
+
 func ErrConflict(format string, args ...any) *Error {
 	return NewError(http.StatusConflict, CodeConflict, format, args...)
 }
@@ -49,6 +57,9 @@ func WriteErr(w http.ResponseWriter, r *http.Request, log *slog.Logger, err erro
 	var fields FieldErrors
 	switch {
 	case errors.As(err, &apiErr):
+		if ms, ok := apiErr.Details["retry_after_ms"].(int64); ok && apiErr.Status == http.StatusTooManyRequests {
+			w.Header().Set("Retry-After", strconv.FormatInt((ms+999)/1000, 10))
+		}
 		WriteErrorDetails(w, r, apiErr.Status, apiErr.Code, apiErr.Message, apiErr.Details)
 	case errors.As(err, &fields):
 		WriteValidation(w, r, fields)

@@ -171,3 +171,28 @@ func (w *statusWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 }
 
 func (w *statusWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+// WithCORS lets browser apps of any origin call the API. This is safe because requests are authenticated by
+// headers (X-Api-Key and a bearer token) that a malicious page cannot obtain, never by cookies, so no credentials
+// are allowed. Preflight requests are answered here, before authentication.
+func WithCORS() Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Header.Get("Origin") == "" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			h := w.Header()
+			h.Set("Access-Control-Allow-Origin", "*")
+			h.Set("Access-Control-Expose-Headers", "X-Request-Id, Retry-After")
+			if r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != "" {
+				h.Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+				h.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Api-Key, X-Request-Id")
+				h.Set("Access-Control-Max-Age", "600")
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}

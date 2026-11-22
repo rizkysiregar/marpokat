@@ -166,6 +166,49 @@ func (q *Queries) GetMember(ctx context.Context, arg GetMemberParams) (GetMember
 	return i, err
 }
 
+const getMemberDetails = `-- name: GetMemberDetails :one
+SELECT cm.role, cm.last_read_seq, cm.joined_at,
+       u.id AS user_id, u.external_id, u.name, u.avatar_url, u.metadata, u.deleted_at AS user_deleted_at
+FROM channel_members cm
+JOIN users u ON u.id = cm.user_id
+WHERE cm.channel_id = $1 AND cm.user_id = $2 AND cm.tenant_id = $3
+`
+
+type GetMemberDetailsParams struct {
+	ChannelID uuid.UUID
+	UserID    uuid.UUID
+	TenantID  uuid.UUID
+}
+
+type GetMemberDetailsRow struct {
+	Role          string
+	LastReadSeq   int64
+	JoinedAt      time.Time
+	UserID        uuid.UUID
+	ExternalID    string
+	Name          string
+	AvatarUrl     *string
+	Metadata      string
+	UserDeletedAt *time.Time
+}
+
+func (q *Queries) GetMemberDetails(ctx context.Context, arg GetMemberDetailsParams) (GetMemberDetailsRow, error) {
+	row := q.db.QueryRow(ctx, getMemberDetails, arg.ChannelID, arg.UserID, arg.TenantID)
+	var i GetMemberDetailsRow
+	err := row.Scan(
+		&i.Role,
+		&i.LastReadSeq,
+		&i.JoinedAt,
+		&i.UserID,
+		&i.ExternalID,
+		&i.Name,
+		&i.AvatarUrl,
+		&i.Metadata,
+		&i.UserDeletedAt,
+	)
+	return i, err
+}
+
 const insertChannel = `-- name: InsertChannel :one
 
 INSERT INTO channels (id, tenant_id, type, name, avatar_url, dm_key, created_by)
@@ -214,6 +257,115 @@ func (q *Queries) InsertChannel(ctx context.Context, arg InsertChannelParams) (C
 		&i.DeletedAt,
 	)
 	return i, err
+}
+
+const listActiveMemberIDs = `-- name: ListActiveMemberIDs :many
+SELECT user_id FROM channel_members
+WHERE channel_id = $1 AND tenant_id = $2 AND left_at IS NULL
+`
+
+type ListActiveMemberIDsParams struct {
+	ChannelID uuid.UUID
+	TenantID  uuid.UUID
+}
+
+// Who receives events of a channel: its active members.
+func (q *Queries) ListActiveMemberIDs(ctx context.Context, arg ListActiveMemberIDsParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listActiveMemberIDs, arg.ChannelID, arg.TenantID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []uuid.UUID{}
+	for rows.Next() {
+		var user_id uuid.UUID
+		if err := rows.Scan(&user_id); err != nil {
+			return nil, err
+		}
+		items = append(items, user_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listCoMemberIDs = `-- name: ListCoMemberIDs :many
+SELECT DISTINCT cm2.user_id
+FROM channel_members cm1
+JOIN channel_members cm2 ON cm2.channel_id = cm1.channel_id AND cm2.tenant_id = cm1.tenant_id
+WHERE cm1.user_id = $2 AND cm1.tenant_id = $1 AND cm1.left_at IS NULL
+  AND cm2.left_at IS NULL AND cm2.user_id <> $2
+LIMIT 2000
+`
+
+type ListCoMemberIDsParams struct {
+	TenantID uuid.UUID
+	UserID   uuid.UUID
+}
+
+// Everyone who shares an active channel with the user: the audience of their presence.
+func (q *Queries) ListCoMemberIDs(ctx context.Context, arg ListCoMemberIDsParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, listCoMemberIDs, arg.TenantID, arg.UserID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []uuid.UUID{}
+	for rows.Next() {
+		var user_id uuid.UUID
+		if err := rows.Scan(&user_id); err != nil {
+			return nil, err
+		}
+		items = append(items, user_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listCoMembersByExternalIDs = `-- name: ListCoMembersByExternalIDs :many
+SELECT u.id, u.external_id
+FROM users u
+WHERE u.tenant_id = $1 AND u.external_id = ANY($3::text[]) AND u.deleted_at IS NULL
+  AND EXISTS (
+      SELECT 1 FROM channel_members a
+      JOIN channel_members b ON b.channel_id = a.channel_id AND b.tenant_id = a.tenant_id
+      WHERE a.user_id = $2 AND a.tenant_id = $1 AND a.left_at IS NULL
+        AND b.user_id = u.id AND b.left_at IS NULL)
+`
+
+type ListCoMembersByExternalIDsParams struct {
+	TenantID uuid.UUID
+	UserID   uuid.UUID
+	Column3  []string
+}
+
+type ListCoMembersByExternalIDsRow struct {
+	ID         uuid.UUID
+	ExternalID string
+}
+
+// Of the given external ids, those who share an active channel with the user (presence is only for them).
+func (q *Queries) ListCoMembersByExternalIDs(ctx context.Context, arg ListCoMembersByExternalIDsParams) ([]ListCoMembersByExternalIDsRow, error) {
+	rows, err := q.db.Query(ctx, listCoMembersByExternalIDs, arg.TenantID, arg.UserID, arg.Column3)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListCoMembersByExternalIDsRow{}
+	for rows.Next() {
+		var i ListCoMembersByExternalIDsRow
+		if err := rows.Scan(&i.ID, &i.ExternalID); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listDMPeers = `-- name: ListDMPeers :many

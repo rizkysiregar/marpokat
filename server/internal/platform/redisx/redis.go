@@ -36,6 +36,24 @@ func Open(ctx context.Context, c config.Redis) (*Client, error) {
 	return &Client{Client: rc, prefix: c.KeyPrefix}, nil
 }
 
+// NewUnconnected builds a client without checking that Redis answers. For tests of failure handling.
+func NewUnconnected(c config.Redis) *Client {
+	rc := redis.NewClient(&redis.Options{Addr: c.Addr(), Password: c.Password, DB: c.DB, DialTimeout: time.Second, MaxRetries: -1})
+	return &Client{Client: rc, prefix: c.KeyPrefix}
+}
+
+// Subscriber returns a client of its own for Pub/Sub, with the same settings. onConnect runs every time it
+// opens a connection to Redis, the first included: a second call means the subscription was lost and rebuilt, and
+// messages published in between are gone.
+func (c *Client) Subscriber(onConnect func()) *redis.Client {
+	opt := *c.Options()
+	opt.OnConnect = func(context.Context, *redis.Conn) error {
+		onConnect()
+		return nil
+	}
+	return redis.NewClient(&opt)
+}
+
 // Key joins the prefix and the given parts with ":", e.g. Key("ch", tenantID, channelID).
 func (c *Client) Key(parts ...string) string { return BuildKey(c.prefix, parts...) }
 

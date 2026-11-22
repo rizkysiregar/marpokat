@@ -21,6 +21,11 @@ info:
     - Ids are UUIDv7 strings. Users are addressed by their **external id** (the tenant's own user id) on the server
       API and in tokens; responses always include both `id` and `external_id`.
     - Every response carries `X-Request-Id` (echoed when the client sends a valid one).
+    - Browsers may call the API from any origin (CORS `*`, no cookies, no credentials mode): requests are authenticated
+      by the `X-Api-Key` and `Authorization` headers only.
+    - Too many requests are answered with `429 rate_limited`, a `Retry-After` header (seconds) and
+      `details.retry_after_ms`. Sending messages is limited to a burst of 10 and then 1 per second per user, and to
+      a burst of 500 and then 100 per second per app.
     - Errors always use the `Error` schema: `{"error": {"code", "message", "request_id", "details"}}`. Clients branch
       on `code`, never on `message`.
     - Lists are cursor paginated: pass back `next_cursor` until it is `null`.
@@ -105,6 +110,42 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  /v1/presence:
+    get:
+      tags: [Me]
+      summary: Who is online
+      description: |
+        For users who share an active channel with the caller; other users are left out of the answer. A user is
+        online while one of their connections has pinged in the last 70 seconds. `last_seen_at` is set for users who
+        are offline and have been connected before. Changes are also announced as `presence` events on the WebSocket.
+      operationId: getPresence
+      parameters:
+        - name: user_ids
+          in: query
+          required: true
+          description: Comma separated external ids, at most 100.
+          schema: { type: string, example: "u_1,u_2" }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [users]
+                properties:
+                  users:
+                    type: array
+                    items:
+                      type: object
+                      required: [user_id, online, last_seen_at]
+                      properties:
+                        user_id: { type: string, description: External id. }
+                        online: { type: boolean }
+                        last_seen_at: { type: [string, "null"], format: date-time }
+        "400": { $ref: "#/components/responses/Validation" }
         "401": { $ref: "#/components/responses/Unauthenticated" }
 
   /v1/channels:

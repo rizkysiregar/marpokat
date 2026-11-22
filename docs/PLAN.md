@@ -7,7 +7,7 @@ yang sama dengan tenant lain nanti, tanpa jalan pintas khusus.
 Dokumen ini acuan utama: keputusan arsitektur, tech stack, desain data dan protokol, pekerjaan infra, integrasi Narrativ,
 serta urutan milestone beserta progress tiap item.
 
-- **Status:** M2 selesai (2026-11-22): DM dan group teruji dengan dua akun di dev. Berikutnya M3 (realtime)
+- **Status:** M3 berjalan: kode, spec, dan prototipe klien selesai dan teruji (juga dengan dua proses sungguhan); menunggu build Marpokat M3 di dev dan uji dua browser
 - **Dibuat:** 2026-11-22
 - **Target MVP:** chat service yang robust untuk 100–1000 user aktif. DM, group, media, reaction. Belum untuk dijual
 - **Repo terkait:** `marpokat` (monorepo ini), `narrativ-backend`, `narrativ-android`, `narrativ-web-client`, `homelabs-gitops`
@@ -26,7 +26,7 @@ tidak dihapus. Keputusan baru ditambahkan ke bagian 2 dengan nomor berikutnya, d
 | M0        | Fondasi: repo, spec, skema, skeleton Go, CI/CD, deploy dev | ✅ Selesai |
 | M1        | Tenant dan autentikasi                                     | ✅ Selesai |
 | M2        | Messaging inti (DM, group, history, sync, outbox)          | ✅ Selesai |
-| M3        | Realtime gateway (WebSocket, fan-out, typing, read)        | ⚪ Belum |
+| M3        | Realtime gateway (WebSocket, fan-out, typing, read)        | 🟡 Berjalan |
 | M4        | Worker, push notification, retry dan DLQ                   | ⚪ Belum |
 | M5        | Media dan reaction, edit/hapus pesan                       | ⚪ Belum |
 | M6        | SDK JS + chat di Narrativ web                              | ⚪ Belum |
@@ -79,6 +79,14 @@ Legenda: ⚪ belum, 🟡 berjalan, ✅ selesai, ⛔ terblokir
 | D36 | **Perubahan channel diumumkan sebagai pesan sistem** (`type: system`, `text: null`, `metadata.event`): `channel.created`, `channel.renamed`, `member.added`, `member.left`, `member.removed` | Ikut urutan, history, dan sync tanpa mekanisme tambahan. Teks dirangkai client dalam bahasa user                                                                               |
 | D37 | **Peran `admin` ada di skema dan izin, tapi belum ada endpoint untuk mengangkat admin**                                                            | Di MVP cukup owner dan member. Endpoint promosi ditambah saat dibutuhkan                                                                                                       |
 | D38 | **Pesan terkunci per channel lewat baris `channels`** (`UPDATE ... last_seq + 1`), commit selalu berurutan seq                                      | Pembaca tidak pernah melihat seq N+1 tanpa N, sehingga kursor sync aman. Biayanya: kirim ke satu channel diserialkan, cukup untuk skala target                                  |
+| D39 | **Fan-out per user, bukan per channel**: satu topik Redis `marpokat:u:{tenant}:{user}`; pod hanya subscribe untuk user yang terkoneksi ke pod itu. Penerima ditentukan dari database saat event dipublikasikan | Menggantikan rencana awal (subscribe per channel). Keanggotaan selalu benar karena dibaca saat itu, tanpa cache keanggotaan di pod yang bisa basi. Biayanya satu PUBLISH per penerima, wajar untuk skala target |
+| D40 | **Event realtime dikirim oleh service setelah commit lewat antarmuka `Notifier`**, best effort. Outbox (D6) tetap hanya untuk worker (push, webhook) di M4 | Realtime boleh hilang karena ada sync (D8). Pekerjaan yang wajib terkirim ada di outbox. Package `channel` dan `message` tidak mengenal `realtime` |
+| D41 | **Langganan Redis dipantau**: klien subscriber sendiri dengan hook `OnConnect` (koneksi ulang berarti event di celah hilang) ditambah beat ke diri sendiri tiap 10 detik (koneksi setengah mati). Jika salah satu terjadi, semua sesi ditutup 1012 dan client sync | Pub/Sub yang tidak diterima hilang selamanya, dan library bisa menyambung ulang diam-diam. Lebih baik client reconnect + sync daripada pura-pura tidak ada yang hilang |
+| D42 | **CORS `*` tanpa credentials** untuk REST, dan WebSocket menerima origin apa pun | Autentikasi lewat header (`X-Api-Key` + bearer) dan frame `auth`, tidak pernah cookie, jadi tidak ada otoritas ambien yang bisa disalahgunakan halaman lain. Wajib agar SDK web dari origin tenant bisa memanggil API |
+| D43 | **Presence = sorted set Redis per user** (skor = batas waktu koneksi, diperbarui tiap ping, TTL 70 detik) plus `GET /v1/presence` untuk kondisi saat ini | Pod yang crash tidak sempat berpamitan: user-nya offline sendiri setelah TTL. Event `presence` hanya memberi tahu perubahan, jadi client yang baru konek perlu REST |
+| D44 | **Rate limit token bucket di Redis (Lua, waktu dari Redis)**: kirim pesan 10 burst lalu 1/detik per user, 500 burst lalu 100/detik per app; 30 frame/detik per koneksi (lokal); maksimal 10 koneksi per user di semua pod. Redis mati: limiter membolehkan (fail open) | Satu user di dua pod tetap satu user. Limiter yang rusak tidak boleh mematikan chat |
+| D45 | **Klien lambat ditutup dengan 1013** saat antrean 256 event penuh; typing kedaluwarsa sendiri di server (6 detik) dan diakhiri saat koneksi putus | Satu klien lambat tidak boleh menahan pod atau memakan memori. Client reconnect + sync |
+| D46 | **Pod hanya ready jika langganan Redis-nya aktif** (`/readyz` memuat `realtime`) | Pod tanpa langganan akan menerima WebSocket yang tidak bisa dilayaninya |
 
 ---
 
@@ -438,18 +446,22 @@ lewat FCM memakai kredensial tenant. Payload: `channel_id`, `message_id`, nama p
 - [x] Build M2 live di dev (`eadceb835267`) dan narrativ-backend#82 di-merge (`d82154d6ab86`)
 - [x] **Selesai jika:** dua user Narrativ dev bisa DM dan group lewat REST, history dan sync benar, test hijau. Diuji end-to-end di dev dengan dua akun (27 pemeriksaan lolos): buka DM dari dua sisi, kirim dan kirim ulang, unread, history, sync, read, balas, token palsu ditolak, group (buat, ganti nama, izin member, owner pindah saat keluar, group berakhir)
 
-### M3: Realtime ⚪
+### M3: Realtime 🟡
 
-- [ ] WS endpoint: handshake `auth`, `protocol_version`, ping/pong, timeout, batas ukuran frame
-- [ ] Hub per pod: session per user (multi device), subscribe Redis per tenant, routing event ke member channel
-- [ ] `message.send` via WS + `ack`/`error`, publish setelah commit
-- [ ] Event `message.new`, `channel.added/updated/removed`, `member.added/removed`, `read.updated`
-- [ ] Typing (ephemeral, throttle) dan presence (Redis TTL + heartbeat)
-- [ ] Rate limit per user dan per tenant (token bucket Redis)
-- [ ] Graceful shutdown dengan close code `1012`
-- [ ] INF-07
-- [ ] Prototipe client JS minimal (`examples/`) untuk uji manual
-- [ ] **Selesai jika:** dua browser chat realtime lewat 2 replika pod, kill satu pod lalu chat tetap jalan setelah reconnect + sync
+- [x] WS endpoint `/v1/ws`: auth di frame pertama (timeout 10 detik → 4001), `protocol_version`, ping/pong, idle 60 detik → 4008, batas frame 64 KB → 1009, token kedaluwarsa menutup koneksi tepat saat `exp` (4004), maksimal 10 koneksi per user di semua pod (4029)
+- [x] Hub per pod: sesi per user (multi device), satu langganan Redis per user yang terkoneksi, event tidak dikirim balik ke koneksi pengirim (D39)
+- [x] `message.send` via WS dengan `ack`/`error` per `id`, idempotent, publish setelah commit (D40). Kirim lewat REST ikut diumumkan ke semua perangkat pengirim
+- [x] Event `message.new`, `channel.added/updated/removed`, `member.added/removed`, `read.updated`, termasuk pengumuman pesan sistem, dengan urutan yang menjaga client tidak menerima pesan untuk channel yang belum dikenalnya
+- [x] Typing (throttle 1/detik per channel, kedaluwarsa 6 detik, berakhir saat koneksi putus) dan presence (D43, `GET /v1/presence`)
+- [x] Rate limit per user, per app, per koneksi (D44), REST membalas `429` dengan `Retry-After`
+- [x] Shutdown rapi: `/readyz` gagal, jeda drain, lalu semua WebSocket ditutup 1012 (`RegisterOnShutdown`)
+- [x] Pemantauan langganan Redis (D41), readiness (D46), metrics `marpokat_ws_*`
+- [x] CORS (D42)
+- [x] INF-07 (timeout ingress 3600 detik, sudah di `apps/marpokat-dev/ingress.yaml`)
+- [x] Prototipe klien web `examples/web-chat` (sekaligus acuan aturan client di spec) dan spec `events.md` / `openapi.yaml` diselaraskan
+- [x] Test (`-race`, 3 kali berulang hijau): autentikasi (13 kasus), pengiriman lintas dua pod, typing dan read, presence (termasuk kedaluwarsa tanpa disconnect), event channel, rate limit, heartbeat, token, batas koneksi, pod hilang, Redis terputus, rate limiter Redis (tepat 10 dari 60 serentak), CORS. Diuji juga dengan dua proses `marpokat api` sungguhan lewat pgbouncer: pesan lintas proses 13 ms, SIGTERM → jeda drain 2 detik → 1012, sync, CORS preflight
+- [ ] Build M3 live di dev
+- [ ] **Selesai jika:** dua browser chat realtime lewat 2 replika pod, kill satu pod lalu chat tetap jalan setelah reconnect + sync. Skenario ini sudah lolos sebagai test otomatis (`TestWebSocketSurvivesAPodGoingAway`) dan dengan proses sungguhan; tinggal diuji di dev dengan dua browser dan `kubectl delete pod`
 
 ### M4: Worker dan push ⚪
 
@@ -527,6 +539,8 @@ kemungkinan untuk semuanya.
 - **Logika client SDK** (reconnect, deteksi celah, antrean pending) paling rawan bug. Alokasikan test lebih banyak di SDK
   daripada di server.
 - **WebSocket di belakang Cloudflare.** Ping 25 detik dan timeout ingress panjang wajib, kalau tidak koneksi putus diam-diam.
+- **Cache tenant 30 detik per pod.** Menonaktifkan tenant atau merotasi secret baru berlaku di semua pod setelah paling lama 30 detik; koneksi WebSocket yang sudah terbuka tetap hidup sampai token-nya habis.
+- **Redis mati berarti realtime berhenti**, bukan chat: pesan tetap tersimpan lewat REST dan sync. Saat Redis kembali, semua sesi ditutup 1012 dan client sync (D41).
 - **Cloudflare menolak User-Agent bawaan beberapa library** (kode 1010, mis. `Python-urllib`). Skrip tes memakai User-Agent sendiri. Browser, OkHttp, dan klien Java Narrativ tidak terpengaruh.
 - **Redis bersama prod Narrativ (D20).** Semua key dan channel wajib berawalan `marpokat:`. Pantau memori Redis.
 - **Data pribadi (UU PDP).** Hapus akun di tenant harus menghapus/anonimkan data di Marpokat (NV-10). Tentukan retensi
@@ -544,3 +558,4 @@ kemungkinan untuk semuanya.
 | 2026-11-22 | M1 selesai: tenant, auth, user API; integrasi Narrativ dev teruji end-to-end   |
 | 2026-11-22 | M2 dikerjakan: D32–D38, channel/pesan/sync/unread, NV-04/05                    |
 | 2026-11-22 | M2 selesai: diuji dengan dua akun di dev                                       |
+| 2026-11-22 | M3 dikerjakan: D39–D46, WebSocket, fan-out Redis, typing, presence, rate limit, CORS |

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -24,12 +25,40 @@ const (
 	MaxPageSize          = 100
 )
 
+// Notifier tells connected clients about what just happened, after it was committed (PLAN M3). Delivery is best
+// effort: clients that miss an event catch up with sync. origin is the connection that caused the change, which
+// already knows (it gets an ack), or "".
+type Notifier interface {
+	MessageCreated(ctx context.Context, tenantID uuid.UUID, msg Message, origin string)
+	ReadUpdated(ctx context.Context, tenantID, channelID, userID uuid.UUID, lastReadSeq int64, origin string)
+}
+
+// Limiter is the rate limiter (platform/ratelimit): false means too many, retry after the duration.
+type Limiter interface {
+	Allow(ctx context.Context, capacity int, perSecond float64, keyParts ...string) (bool, time.Duration)
+}
+
+// Send rate limits (PLAN section 7): a burst of 10 and 60 per minute per user, and per tenant so that one busy app
+// cannot starve the others.
+const (
+	userBurst       = 10
+	userPerSecond   = 1.0
+	tenantBurst     = 500
+	tenantPerSecond = 100.0
+)
+
 type Service struct {
-	pool *pgxpool.Pool
-	q    store.Querier
+	pool     *pgxpool.Pool
+	q        store.Querier
+	notifier Notifier
+	limiter  Limiter
 }
 
 func NewService(pool *pgxpool.Pool) *Service { return &Service{pool: pool, q: store.New(pool)} }
+
+// SetNotifier and SetLimiter are called once while wiring, before the service takes requests.
+func (s *Service) SetNotifier(n Notifier) { s.notifier = n }
+func (s *Service) SetLimiter(l Limiter)   { s.limiter = l }
 
 // SendInput is one message from a user.
 type SendInput struct {
@@ -38,6 +67,8 @@ type SendInput struct {
 	SenderID    uuid.UUID
 	ClientMsgID string
 	Text        string
+	// Origin is the WebSocket connection that sends, so that its owner is not sent the message back as an event.
+	Origin string
 }
 
 // Validate normalises the input (trimmed text) and reports field errors.
@@ -85,6 +116,14 @@ func (s *Service) Send(ctx context.Context, in SendInput) (msg Message, created 
 	if existing, ok, err := s.byClientID(ctx, in); err != nil || ok {
 		return existing, false, err
 	}
+	if s.limiter != nil {
+		if ok, wait := s.limiter.Allow(ctx, userBurst, userPerSecond, "send", in.TenantID.String(), in.SenderID.String()); !ok {
+			return Message{}, false, httpx.ErrRateLimited(wait, "you are sending too fast, try again in %s", wait.Round(time.Millisecond))
+		}
+		if ok, wait := s.limiter.Allow(ctx, tenantBurst, tenantPerSecond, "send-tenant", in.TenantID.String()); !ok {
+			return Message{}, false, httpx.ErrRateLimited(wait, "this app is sending too fast, try again in %s", wait.Round(time.Millisecond))
+		}
+	}
 
 	var appended Appended
 	cmid := in.ClientMsgID
@@ -121,7 +160,11 @@ func (s *Service) Send(ctx context.Context, in SendInput) (msg Message, created 
 	if err != nil {
 		return Message{}, false, fmt.Errorf("message: load sent message: %w", err)
 	}
-	return FromDetail(d), true, nil
+	msg = FromDetail(d)
+	if s.notifier != nil {
+		s.notifier.MessageCreated(ctx, in.TenantID, msg, in.Origin)
+	}
+	return msg, true, nil
 }
 
 func (s *Service) byClientID(ctx context.Context, in SendInput) (Message, bool, error) {
@@ -219,8 +262,9 @@ func page(rows []store.MessageDetail, limit int) ([]Message, bool, error) {
 	return out, hasMore, nil
 }
 
-// MarkRead moves the read marker of the user forward and returns where it is now.
-func (s *Service) MarkRead(ctx context.Context, tenantID, channelID, userID uuid.UUID, seq int64) (int64, error) {
+// MarkRead moves the read marker of the user forward and returns where it is now. origin is the WebSocket
+// connection that asked, or "".
+func (s *Service) MarkRead(ctx context.Context, tenantID, channelID, userID uuid.UUID, seq int64, origin string) (int64, error) {
 	if seq < 0 {
 		return 0, httpx.FieldErrors{"seq": "must be 0 or more"}
 	}
@@ -230,6 +274,9 @@ func (s *Service) MarkRead(ctx context.Context, tenantID, channelID, userID uuid
 	}
 	if err != nil {
 		return 0, fmt.Errorf("message: mark read: %w", err)
+	}
+	if s.notifier != nil {
+		s.notifier.ReadUpdated(ctx, tenantID, channelID, userID, got, origin)
 	}
 	return got, nil
 }
@@ -261,5 +308,9 @@ func (s *Service) SendSystem(ctx context.Context, tenantID, channelID uuid.UUID,
 	if err != nil {
 		return Message{}, fmt.Errorf("message: load system message: %w", err)
 	}
-	return FromDetail(d), nil
+	msg := FromDetail(d)
+	if s.notifier != nil {
+		s.notifier.MessageCreated(ctx, tenantID, msg, "")
+	}
+	return msg, nil
 }

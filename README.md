@@ -11,6 +11,7 @@ Plan, decisions and progress: [`docs/PLAN.md`](docs/PLAN.md).
 | --------------- | ------------------------------------------------------------------------ |
 | `server/`       | Go backend, one binary: `marpokat api`, `worker`, `migrate`              |
 | `spec/`         | The contract: `openapi.yaml` (REST) and `events.md` (WebSocket)           |
+| `examples/`     | `web-chat`: a one-file client to try the chat by hand                    |
 | `sdk-js/`       | `@marpokat/core` and `@marpokat/react` (from M6)                          |
 | `sdk-android/`  | Kotlin SDK (from M7)                                                      |
 | `docs/`         | Plan and integration docs                                                |

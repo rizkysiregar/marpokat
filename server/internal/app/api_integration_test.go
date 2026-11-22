@@ -31,6 +31,7 @@ type env struct {
 	t       *testing.T
 	srv     *httptest.Server
 	tenants *tenant.Service
+	pods    []*pod // set by newRealtimeEnv; srv is the first
 }
 
 func newEnv(t *testing.T) *env {

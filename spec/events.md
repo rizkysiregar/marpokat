@@ -4,7 +4,7 @@ Contract of the WebSocket connection between SDKs and Marpokat. The REST contrac
 object shapes used here (`Message`, `Channel`, `User`, `Member`, `Attachment`, `ReactionSummary`) are the schemas
 defined there and are not repeated.
 
-- **Status:** draft v1 (M0). Changes before M6 may break; after the first SDK release, only additive changes in v1.
+- **Status:** v1, implemented by the server since M3. Changes before the first SDK release (M6) may still break; after it, only additive changes in v1.
 - **Protocol version:** `1`
 
 ---
@@ -19,6 +19,8 @@ wss://api-dev-marpokat.rizkysiregar.my.id/v1/ws    (dev)
 - Text frames only, one JSON object per frame, UTF-8. Maximum frame size 64 KB (larger frames close the
   connection with `1009`).
 - Browsers cannot set headers on a WebSocket, so credentials go in the first frame (`auth`), never in the URL.
+- Any origin may connect: the connection has no cookies and is authenticated in its first frame, so a page of another
+  origin has nothing to abuse (the same reason the REST API answers every origin with CORS `*`).
 - The server closes a connection that has not sent `auth` within **10 seconds** (`4001`).
 - One user may have many connections (several devices or tabs). Each receives every event.
 
@@ -169,6 +171,31 @@ the change took (section 6).
 
 In `ReactionSummary` inside events, `mine` is computed for the receiving user.
 
+### 5.1 Who receives what
+
+| Event | Receivers |
+| --- | --- |
+| `message.new` | every active member of the channel, **except the connection that sent it with `message.send`** (it gets the `ack`). A message sent over REST has no such connection: every connection of the sender hears it |
+| `read.updated` | every active member, except the connection that sent `read.mark`. The reader's own other devices need it to update their unread counts |
+| `typing` | the other members, never the typist (on any device) |
+| `presence` | everyone who shares an active channel with the user; sent when their first connection opens and their last one ends |
+| `channel.added` | the users who just got the channel (each with the channel as they see it) |
+| `channel.updated` | every active member (each with the channel as they see it) |
+| `channel.removed` | the user who lost the channel, on all devices; `reason` is `left` or `removed` |
+| `member.added` | the members who were already there, not the new one (who gets `channel.added`) |
+| `member.removed` | the members who remain |
+
+The announcement of a membership change (a system `message.new`) follows the event of the change: a new member hears
+`channel.added` first, so the channel is known when its messages arrive. Delivery is best effort: after a long
+silence, an unexpected reconnect or a gap in `rev_seq`, sync.
+
+### 5.2 Presence over REST
+
+A client that just connected does not know who is online. `GET /v1/presence?user_ids=a,b,c` (external ids, at most 100)
+answers `{"users": [{"user_id", "online", "last_seen_at"}]}` for the users who share a channel with the caller; the
+others are left out. A connection counts as online for 70 seconds after its last ping, so a user whose connection
+died without goodbye goes offline by itself.
+
 ## 6. Ordering, gaps and sync
 
 Each channel has one counter. Every change takes the next value:
@@ -185,7 +212,9 @@ Per channel the client stores a **cursor** = the highest `rev_seq` it has applie
   `has_more` is false.
 
 Realtime delivery is best-effort (Redis Pub/Sub); **sync is the source of truth**. Events from different channels
-have no relative order.
+have no relative order. Within one channel two messages committed at nearly the same moment can arrive in either
+order (they are published by different pods): the gap rule above handles it, and the sync it triggers returns nothing
+new when the missing one has arrived by then.
 
 Events without `rev_seq` (`read.updated`, `typing`, `presence`, `channel.*`, `member.*`) are state snapshots:
 apply the latest. `channel.*` and `member.*` are also covered by `GET /v1/channels?updated_since=`.
@@ -238,14 +267,16 @@ The codes are shared with REST (`Error.code` in openapi.yaml).
 | `1000` | Normal close                     | Reconnect only if still needed        |
 | `1009` | Frame too large                  | Bug in the client; reconnect          |
 | `1011` | Server error                     | Reconnect with backoff                |
-| `1012` | Server restart (deploy/shutdown) | Reconnect immediately                 |
+| `1012` | Server restart (deploy/shutdown), or the server lost its event source and cannot promise that nothing was missed | Reconnect immediately, then sync |
 | `4000` | Protocol error (bad frame)       | Reconnect with backoff, report bug    |
 | `4001` | No `auth` within 10 s            | Reconnect                             |
 | `4003` | Authentication failed            | Do not reconnect until new credentials |
 | `4004` | Token expired                    | Refresh token, reconnect              |
 | `4005` | Unsupported `protocol_version`   | Do not reconnect; upgrade the SDK     |
 | `4008` | Heartbeat timeout                | Reconnect                             |
-| `4029` | Rate limited (connection flood)  | Reconnect with backoff                |
+| `4029` | Too many connections of this user | Close another connection first, then reconnect with backoff |
+| `1011` | Server error, or realtime not ready yet (a starting pod) | Reconnect with backoff |
+| `1013` | The client did not read its events fast enough (its queue of 256 events was full) | Reconnect, then sync |
 
 ## 10. Limits and rate limits (v1 defaults, per tenant configurable later)
 
@@ -253,9 +284,10 @@ The codes are shared with REST (`Error.code` in openapi.yaml).
 | ---------------------------- | ----------------------------------------- |
 | Frame size                   | 64 KB                                     |
 | Connections per user         | 10                                        |
-| `message.send` per user      | 10 per second burst, 60 per minute        |
-| `typing.*` per user          | 1 per second per channel                  |
-| Requests per connection      | 30 per second                             |
+| `message.send` per user      | a burst of 10, then 1 per second (60 per minute), over REST and WebSocket together |
+| `message.send` per app       | a burst of 500, then 100 per second       |
+| `typing.start` per channel   | 1 per second per connection, the rest is dropped without an error |
+| Frames per connection        | 30 per second (`ping` is exempt)          |
 | Text, attachments, members   | as in openapi.yaml, section Limits        |
 
 ## 11. Push notification payload (FCM data message)

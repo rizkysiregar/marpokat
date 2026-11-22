@@ -14,6 +14,11 @@ type Registry struct {
 	*prometheus.Registry
 	HTTPRequests *prometheus.CounterVec
 	HTTPDuration *prometheus.HistogramVec
+
+	WSConnections     prometheus.Gauge
+	WSClosed          *prometheus.CounterVec
+	WSFramesIn        *prometheus.CounterVec
+	WSEventsDelivered *prometheus.CounterVec
 }
 
 func New(version string) *Registry {
@@ -41,8 +46,24 @@ func New(version string) *Registry {
 			Help:    "HTTP request latency by route pattern and method.",
 			Buckets: []float64{.005, .01, .025, .05, .1, .25, .5, 1, 2.5, 5},
 		}, []string{"route", "method"}),
+		WSConnections: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "marpokat_ws_connections",
+			Help: "WebSocket connections open on this pod.",
+		}),
+		WSClosed: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "marpokat_ws_closed_total",
+			Help: "WebSocket connections that ended, by close code.",
+		}, []string{"code"}),
+		WSFramesIn: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "marpokat_ws_frames_in_total",
+			Help: "Frames received from clients, by type.",
+		}, []string{"type"}),
+		WSEventsDelivered: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "marpokat_ws_events_delivered_total",
+			Help: "Events written to client sockets, by type.",
+		}, []string{"type"}),
 	}
-	r.MustRegister(build, m.HTTPRequests, m.HTTPDuration)
+	r.MustRegister(build, m.HTTPRequests, m.HTTPDuration, m.WSConnections, m.WSClosed, m.WSFramesIn, m.WSEventsDelivered)
 	return m
 }
 

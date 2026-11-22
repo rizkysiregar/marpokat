@@ -115,3 +115,35 @@ FROM channel_members cm
 JOIN users u ON u.id = cm.user_id
 WHERE cm.channel_id = ANY(string_to_array(sqlc.arg('channel_ids')::text, ',')::uuid[]) AND cm.tenant_id = sqlc.arg('tenant_id')
   AND cm.user_id <> sqlc.arg('user_id');
+
+-- name: ListActiveMemberIDs :many
+-- Who receives events of a channel: its active members.
+SELECT user_id FROM channel_members
+WHERE channel_id = $1 AND tenant_id = $2 AND left_at IS NULL;
+
+-- name: ListCoMemberIDs :many
+-- Everyone who shares an active channel with the user: the audience of their presence.
+SELECT DISTINCT cm2.user_id
+FROM channel_members cm1
+JOIN channel_members cm2 ON cm2.channel_id = cm1.channel_id AND cm2.tenant_id = cm1.tenant_id
+WHERE cm1.user_id = $2 AND cm1.tenant_id = $1 AND cm1.left_at IS NULL
+  AND cm2.left_at IS NULL AND cm2.user_id <> $2
+LIMIT 2000;
+
+-- name: ListCoMembersByExternalIDs :many
+-- Of the given external ids, those who share an active channel with the user (presence is only for them).
+SELECT u.id, u.external_id
+FROM users u
+WHERE u.tenant_id = $1 AND u.external_id = ANY($3::text[]) AND u.deleted_at IS NULL
+  AND EXISTS (
+      SELECT 1 FROM channel_members a
+      JOIN channel_members b ON b.channel_id = a.channel_id AND b.tenant_id = a.tenant_id
+      WHERE a.user_id = $2 AND a.tenant_id = $1 AND a.left_at IS NULL
+        AND b.user_id = u.id AND b.left_at IS NULL);
+
+-- name: GetMemberDetails :one
+SELECT cm.role, cm.last_read_seq, cm.joined_at,
+       u.id AS user_id, u.external_id, u.name, u.avatar_url, u.metadata, u.deleted_at AS user_deleted_at
+FROM channel_members cm
+JOIN users u ON u.id = cm.user_id
+WHERE cm.channel_id = $1 AND cm.user_id = $2 AND cm.tenant_id = $3;

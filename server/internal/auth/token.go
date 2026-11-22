@@ -58,18 +58,25 @@ func parse(token string, secret []byte, now time.Time) (*claims, error) {
 
 // VerifyUserToken checks a user token and returns its subject (the external user id).
 func VerifyUserToken(token string, secret []byte, now time.Time) (string, error) {
+	sub, _, err := VerifyUserTokenExpiry(token, secret, now)
+	return sub, err
+}
+
+// VerifyUserTokenExpiry is VerifyUserToken that also returns when the token expires. A WebSocket stays open far
+// longer than one request, so it must end the connection itself at that moment.
+func VerifyUserTokenExpiry(token string, secret []byte, now time.Time) (string, time.Time, error) {
 	c, err := parse(token, secret, now)
 	if err != nil {
-		return "", err
+		return "", time.Time{}, err
 	}
 	if c.Server {
-		return "", fmt.Errorf("%w: a server token cannot be used as a user token", ErrTokenInvalid)
+		return "", time.Time{}, fmt.Errorf("%w: a server token cannot be used as a user token", ErrTokenInvalid)
 	}
 	sub := strings.TrimSpace(c.Subject)
 	if sub == "" || len(sub) > maxExternalIDLength {
-		return "", fmt.Errorf("%w: sub must be the external user id (1-%d characters)", ErrTokenInvalid, maxExternalIDLength)
+		return "", time.Time{}, fmt.Errorf("%w: sub must be the external user id (1-%d characters)", ErrTokenInvalid, maxExternalIDLength)
 	}
-	return sub, nil
+	return sub, c.ExpiresAt.Time, nil
 }
 
 // VerifyServerToken checks a server token.

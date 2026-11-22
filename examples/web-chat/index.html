@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Marpokat web chat (example)</title>
+<style>
+  :root { color-scheme: light dark; --line: #8884; --muted: #888; --me: #3b82f6; --them: #8882; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.4 system-ui, sans-serif; height: 100vh; display: flex; flex-direction: column; }
+  header { padding: 8px 12px; border-bottom: 1px solid var(--line); display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  header input { padding: 4px 6px; min-width: 0; }
+  header .grow { flex: 1 1 220px; }
+  main { flex: 1; display: flex; min-height: 0; }
+  #channels { width: 260px; border-right: 1px solid var(--line); overflow: auto; }
+  #channels div { padding: 8px 12px; border-bottom: 1px solid var(--line); cursor: pointer; display: flex; gap: 6px; align-items: center; }
+  #channels div.active { background: var(--them); }
+  #channels .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .badge { background: var(--me); color: #fff; border-radius: 9px; padding: 0 6px; font-size: 12px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+  .dot.on { background: #22c55e; }
+  #chat { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #title { padding: 8px 12px; border-bottom: 1px solid var(--line); font-weight: 600; }
+  #messages { flex: 1; overflow: auto; padding: 12px; display: flex; flex-direction: column; gap: 6px; }
+  .msg { max-width: 70%; padding: 6px 10px; border-radius: 12px; background: var(--them); align-self: flex-start; word-break: break-word; }
+  .msg.mine { background: var(--me); color: #fff; align-self: flex-end; }
+  .msg.system { align-self: center; background: none; color: var(--muted); font-size: 12px; }
+  .msg.pending { opacity: .55; }
+  .msg small { display: block; opacity: .7; font-size: 11px; }
+  #typing { height: 20px; padding: 0 12px; color: var(--muted); font-size: 12px; }
+  form { display: flex; gap: 6px; padding: 8px 12px; border-top: 1px solid var(--line); }
+  form input { flex: 1; padding: 8px; }
+  #status { font-size: 12px; color: var(--muted); }
+  details { border-top: 1px solid var(--line); max-height: 30vh; overflow: auto; font: 12px/1.3 ui-monospace, monospace; }
+  details summary { padding: 4px 12px; cursor: pointer; }
+  #log { padding: 0 12px 8px; white-space: pre-wrap; word-break: break-all; }
+  @media (max-width: 700px) { #channels { width: 120px; } }
+</style>
+</head>
+<body>
+<header>
+  <input id="base" class="grow" placeholder="Marpokat URL, e.g. https://api-dev-marpokat.rizkysiregar.my.id">
+  <input id="key" placeholder="api key (mpk_...)" size="22">
+  <input id="token" class="grow" placeholder="user token (JWT)">
+  <button id="connect">Connect</button>
+  <details style="border:0;max-height:none">
+    <summary>Get a token from Narrativ</summary>
+    <input id="nv" placeholder="Narrativ API, e.g. https://api-dev-narrativ.rizkysiregar.my.id/api/v1" size="40">
+    <input id="nvUser" placeholder="username"> <input id="nvPass" type="password" placeholder="password">
+    <button id="nvGo" type="button">Sign in</button>
+  </details>
+  <span id="status">disconnected</span>
+</header>
+<main>
+  <div id="channels"></div>
+  <div id="chat">
+    <div id="title">Pick a channel</div>
+    <div id="messages"></div>
+    <div id="typing"></div>
+    <form id="form"><input id="text" placeholder="Message" autocomplete="off" disabled><button disabled>Send</button></form>
+  </div>
+</main>
+<details><summary>Frames</summary><div id="log"></div></details>
+
+<script>
+// A small client of the Marpokat protocol (spec/events.md). It is also the reference for the rules of the spec:
+// the per channel cursor and gap rule (section 6), the reconnect rule (section 7) and idempotent sends (client_msg_id).
+const $ = (id) => document.getElementById(id);
+const store = (k, v) => { try { v === undefined ? localStorage.getItem(k) : localStorage.setItem(k, v); } catch {} return v; };
+const get = (k) => { try { return localStorage.getItem(k) || ''; } catch { return ''; } };
+for (const k of ['base', 'key', 'token', 'nv', 'nvUser']) $(k).value = get('mp.' + k);
+
+const s = {
+  ws: null, attempt: 0, retry: null, ping: null, stopped: false, me: null,
+  channels: new Map(),   // id -> channel as the server sent it, plus {messages: Map(seq -> message), cursor}
+  online: new Map(),     // external id -> bool
+  current: null,
+  pending: new Map(),    // client_msg_id -> {channelId, text}: sent but not acked, resent after a reconnect
+  typingUntil: new Map(),// "channel:user" -> timeout handle
+  lastTypingSent: 0,
+};
+
+const log = (dir, f) => { const el = $('log'); el.textContent = `${dir} ${typeof f === 'string' ? f : JSON.stringify(f)}\n` + el.textContent.slice(0, 20000); };
+const status = (t) => { $('status').textContent = t; };
+const wsUrl = () => $('base').value.trim().replace(/\/+$/, '').replace(/^http/, 'ws') + '/v1/ws';
+
+async function api(path, opts = {}) {
+  const res = await fetch($('base').value.trim().replace(/\/+$/, '') + path, {
+    ...opts,
+    headers: { 'X-Api-Key': $('key').value.trim(), Authorization: 'Bearer ' + $('token').value.trim(), 'Content-Type': 'application/json', ...(opts.headers || {}) },
+  });
+  const body = res.status === 204 ? null : await res.json().catch(() => null);
+  if (!res.ok) throw Object.assign(new Error(body?.error?.message || res.statusText), { status: res.status, code: body?.error?.code });
+  return body;
+}
+
+// ---------------------------------------------------------------- connection
+function connect() {
+  for (const k of ['base', 'key', 'token']) store('mp.' + k, $(k).value.trim());
+  s.stopped = false; clearTimeout(s.retry);
+  if (s.ws) { s.ws.onclose = null; s.ws.close(); }
+  status('connecting…');
+  const ws = (s.ws = new WebSocket(wsUrl()));
+  ws.onopen = () => send('auth', { api_key: $('key').value.trim(), token: $('token').value.trim(), protocol_version: 1 }, 'a1');
+  ws.onmessage = (e) => { const f = JSON.parse(e.data); log('<', f); onFrame(f); };
+  ws.onclose = (e) => onClose(e.code);
+}
+
+function send(type, data, id) {
+  if (s.ws?.readyState !== WebSocket.OPEN) return false;
+  const f = { type, data }; if (id) f.id = id;
+  log('>', f); s.ws.send(JSON.stringify(f)); return true;
+}
+
+function onClose(code) {
+  clearInterval(s.ping); s.ws = null; $('text').disabled = true;
+  // 4003 bad credentials, 4005 protocol: retrying cannot help. 4004 token expired: a new token is needed
+  if (code === 4003 || code === 4005) { s.stopped = true; return status(`closed ${code}: check the api key and token`); }
+  if (code === 4004) { s.stopped = true; return status('token expired: paste a new one and connect'); }
+  if (s.stopped) return;
+  // full jitter, and 1012 (server restart) reconnects at once: spec section 7
+  const delay = code === 1012 && s.attempt === 0 ? 0 : Math.random() * Math.min(30000, 500 * 2 ** s.attempt);
+  s.attempt++; status(`closed ${code}, reconnecting in ${Math.round(delay)} ms`);
+  s.retry = setTimeout(connect, delay);
+}
+
+async function onAuthOk(d) {
+  s.me = d.user; s.attempt = 0; status(`connected as ${d.user.name || d.user.external_id}`);
+  $('text').disabled = false; $('form').querySelector('button').disabled = false;
+  s.ping = setInterval(() => send('ping', {}), d.heartbeat_interval_ms); // Cloudflare drops idle sockets after ~100s
+  await loadChannels();                  // spec 7.4: what changed in the list of channels
+  if (s.current) await syncChannel(s.current);
+  for (const [clientMsgId, p] of s.pending) sendMessage(p.channelId, p.text, clientMsgId); // 7.6, same ids: no duplicates
+}
+
+// ---------------------------------------------------------------- frames
+function onFrame(f) {
+  const d = f.data || {};
+  switch (f.type) {
+    case 'auth.ok': return void onAuthOk(d);
+    case 'ack': { const m = d.message; if (m) { s.pending.delete(m.client_msg_id); applyMessage(m); } return; }
+    case 'error': return void status(`error: ${d.code}: ${d.message}`);
+    case 'message.new': return void onMessageNew(d);
+    case 'read.updated': return;
+    case 'typing': return void onTyping(d);
+    case 'presence': s.online.set(d.user_id, d.online); return renderChannels();
+    case 'channel.added': case 'channel.updated': return void putChannel(d.channel);
+    case 'channel.removed': s.channels.delete(d.channel_id); if (s.current === d.channel_id) s.current = null; return render();
+    case 'member.added': case 'member.removed': return;
+  }
+}
+
+// spec section 6: apply what is next, ignore what is known, and sync when something is missing
+function onMessageNew(d) {
+  const ch = s.channels.get(d.channel_id); if (!ch) return loadChannels();
+  if (d.rev_seq <= ch.cursor) return;
+  const gap = d.rev_seq > ch.cursor + 1;
+  applyMessage(d.message);
+  if (gap) { clearTimeout(ch.syncTimer); ch.syncTimer = setTimeout(() => syncChannel(d.channel_id), 150); }
+  if (d.channel_id === s.current && document.visibilityState === 'visible') markRead(d.channel_id, d.message.seq);
+}
+
+function applyMessage(m) {
+  const ch = s.channels.get(m.channel_id); if (!ch) return;
+  ch.messages.set(m.seq, m);
+  while (ch.messages.has(ch.cursor + 1)) ch.cursor++;   // the cursor is the highest rev_seq with nothing missing below
+  ch.last_message = m;
+  if (m.channel_id !== s.current && m.sender && m.sender.external_id !== s.me.external_id && m.type !== 'system') ch.membership.unread_count++;
+  render();
+}
+
+async function syncChannel(id) {
+  const ch = s.channels.get(id); if (!ch) return;
+  for (;;) {
+    const r = await api(`/v1/channels/${id}/sync?since_rev=${ch.cursor}&limit=100`);
+    r.messages.forEach((m) => ch.messages.set(m.seq, m));
+    while (ch.messages.has(ch.cursor + 1)) ch.cursor++;
+    if (!r.has_more) { ch.cursor = Math.max(ch.cursor, r.next_rev); break; }
+    ch.cursor = r.next_rev;
+  }
+  render();
+}
+
+// ---------------------------------------------------------------- channels
+function putChannel(c) {
+  const old = s.channels.get(c.id);
+  s.channels.set(c.id, Object.assign(c, { messages: old?.messages || new Map(), cursor: old?.cursor || 0 }));
+  if (!old && c.last_message) c.messages.set(c.last_message.seq, c.last_message);
+  render();
+}
+
+async function loadChannels() {
+  const r = await api('/v1/channels?limit=100');
+  for (const c of r.channels) putChannel(c);
+  const peers = r.channels.filter((c) => c.dm_peer).map((c) => c.dm_peer.external_id);
+  if (peers.length) { // who is online right now (the presence events only tell about changes)
+    const p = await api('/v1/presence?user_ids=' + encodeURIComponent(peers.join(',')));
+    p.users.forEach((u) => s.online.set(u.user_id, u.online));
+  }
+  render();
+}
+
+async function openChannel(id) {
+  s.current = id; const ch = s.channels.get(id);
+  const r = await api(`/v1/channels/${id}/messages?limit=50`);  // newest first
+  r.messages.forEach((m) => ch.messages.set(m.seq, m));
+  const seqs = [...ch.messages.keys()];
+  if (!ch.cursor && seqs.length) ch.cursor = Math.max(...seqs);  // never synced: history starts the cursor
+  ch.membership.unread_count = 0;
+  render(); if (seqs.length) markRead(id, Math.max(...seqs));
+}
+
+function markRead(id, seq) { send('read.mark', { channel_id: id, seq }, 'r' + Date.now()); }
+
+const nameOf = (c) => c.name || c.dm_peer?.name || c.dm_peer?.external_id || c.id.slice(0, 8);
+
+function render() { renderChannels(); renderMessages(); }
+
+function renderChannels() {
+  const box = $('channels'); box.textContent = '';
+  const list = [...s.channels.values()].sort((a, b) => new Date(b.last_message_at || b.created_at) - new Date(a.last_message_at || a.created_at));
+  for (const c of list) {
+    const row = document.createElement('div'); if (c.id === s.current) row.className = 'active';
+    const dot = document.createElement('span'); dot.className = 'dot' + (c.dm_peer && s.online.get(c.dm_peer.external_id) ? ' on' : '');
+    const name = document.createElement('span'); name.className = 'name'; name.textContent = nameOf(c);
+    row.append(dot, name);
+    if (c.membership.unread_count > 0) { const b = document.createElement('span'); b.className = 'badge'; b.textContent = c.membership.unread_count; row.append(b); }
+    row.onclick = () => openChannel(c.id);
+    box.append(row);
+  }
+}
+
+function describe(m) { // system messages are worded by the client, from metadata.event
+  const md = m.metadata || {}, who = (id) => id || 'someone';
+  switch (md.event) {
+    case 'channel.created': return `${who(md.actor_id)} created the group “${md.name}”`;
+    case 'channel.renamed': return `${who(md.actor_id)} renamed the group to “${md.name}”`;
+    case 'member.added': return `${who(md.actor_id)} added ${(md.user_ids || []).join(', ')}`;
+    case 'member.left': return `${who(md.user_id)} left`;
+    case 'member.removed': return `${who(md.actor_id)} removed ${who(md.user_id)}`;
+    default: return m.text || md.event || 'system message';
+  }
+}
+
+function renderMessages() {
+  const box = $('messages'); const ch = s.channels.get(s.current);
+  $('title').textContent = ch ? nameOf(ch) : 'Pick a channel';
+  const stick = box.scrollTop + box.clientHeight >= box.scrollHeight - 40;
+  box.textContent = '';
+  if (!ch) return;
+  for (const m of [...ch.messages.values()].sort((a, b) => a.seq - b.seq)) {
+    const el = document.createElement('div'); el.className = 'msg';
+    if (m.type === 'system') { el.classList.add('system'); el.textContent = describe(m); }
+    else {
+      if (m.sender?.external_id === s.me?.external_id) el.classList.add('mine');
+      else { const who = document.createElement('small'); who.textContent = m.sender?.name || m.sender?.external_id; el.append(who); }
+      el.append(document.createTextNode(m.text ?? ''));
+    }
+    box.append(el);
+  }
+  for (const [id, p] of s.pending) if (p.channelId === s.current) { // sent, not acked yet
+    const el = document.createElement('div'); el.className = 'msg mine pending'; el.textContent = p.text; box.append(el);
+  }
+  if (stick) box.scrollTop = box.scrollHeight;
+}
+
+// ---------------------------------------------------------------- sending and typing
+function sendMessage(channelId, text, clientMsgId = crypto.randomUUID()) {
+  s.pending.set(clientMsgId, { channelId, text });   // kept until the ack: a reconnect resends it with the same id
+  send('message.send', { channel_id: channelId, client_msg_id: clientMsgId, text }, 'm' + clientMsgId);
+  renderMessages();
+}
+
+$('form').onsubmit = (e) => {
+  e.preventDefault(); const text = $('text').value.trim(); if (!text || !s.current) return;
+  $('text').value = ''; sendMessage(s.current, text);
+  send('typing.stop', { channel_id: s.current });
+};
+
+$('text').oninput = () => { // at most every 3 seconds while typing (spec 4.2)
+  if (!s.current || Date.now() - s.lastTypingSent < 3000) return;
+  s.lastTypingSent = Date.now(); send('typing.start', { channel_id: s.current });
+};
+
+function onTyping(d) {
+  const key = `${d.channel_id}:${d.user_id}`; clearTimeout(s.typingUntil.get(key));
+  if (d.typing) s.typingUntil.set(key, setTimeout(() => { s.typingUntil.delete(key); showTyping(); }, 6000)); else s.typingUntil.delete(key);
+  showTyping();
+}
+function showTyping() {
+  const names = [...s.typingUntil.keys()].filter((k) => k.startsWith(s.current + ':')).map((k) => k.split(':')[1]);
+  $('typing').textContent = names.length ? `${names.join(', ')} typing…` : '';
+}
+
+// ---------------------------------------------------------------- Narrativ helper: fills in key and token
+$('nvGo').onclick = async () => {
+  try {
+    const nv = $('nv').value.trim().replace(/\/+$/, ''); store('mp.nv', nv); store('mp.nvUser', $('nvUser').value);
+    const login = await (await fetch(nv + '/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: $('nvUser').value, password: $('nvPass').value }) })).json();
+    const access = JSON.stringify(login).match(/"accessToken":"([^"]+)"/)?.[1];
+    const t = await (await fetch(nv + '/chat/token', { method: 'POST', headers: { Authorization: 'Bearer ' + access } })).json();
+    $('base').value = t.data.baseUrl; $('key').value = t.data.apiKey; $('token').value = t.data.token;
+    status('token received: press Connect');
+  } catch (err) { status('Narrativ sign in failed: ' + err.message); }
+};
+
+$('connect').onclick = connect;
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && s.current) openChannel(s.current); });
+</script>
+</body>
+</html>

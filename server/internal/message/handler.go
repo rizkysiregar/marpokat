@@ -135,7 +135,7 @@ func (h *Handler) read(w http.ResponseWriter, r *http.Request) {
 		httpx.WriteValidation(w, r, httpx.FieldErrors{"seq": "is required"})
 		return
 	}
-	if _, err := h.svc.MarkRead(r.Context(), p.Tenant.ID, channelID, p.UserID, *body.Seq); err != nil {
+	if _, err := h.svc.MarkRead(r.Context(), p.Tenant.ID, channelID, p.UserID, *body.Seq, ""); err != nil {
 		httpx.WriteErr(w, r, h.log, err)
 		return
 	}

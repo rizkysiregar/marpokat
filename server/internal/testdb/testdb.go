@@ -24,7 +24,10 @@ import (
 	"github.com/rizkysiregar/marpokat/server/internal/platform/migrate"
 )
 
-var pool *pgxpool.Pool
+var (
+	pool      *pgxpool.Pool
+	redisConf config.Redis
+)
 
 // Main is called from TestMain: it starts the container, migrates, runs the tests and cleans up.
 func Main(m *testing.M) {
@@ -75,7 +78,41 @@ func run(m *testing.M) int {
 		return 1
 	}
 	defer pool.Close()
+
+	rctr, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
+		ContainerRequest: testcontainers.ContainerRequest{
+			Image:        "redis:7-alpine",
+			ExposedPorts: []string{"6379/tcp"},
+			WaitingFor:   wait.ForLog("Ready to accept connections").WithStartupTimeout(60 * time.Second),
+		},
+		Started: true,
+	})
+	if err != nil {
+		slog.Error("start redis container", "error", err)
+		return 1
+	}
+	defer func() { _ = testcontainers.TerminateContainer(rctr) }()
+	rhost, err := rctr.Host(ctx)
+	if err != nil {
+		slog.Error("redis host", "error", err)
+		return 1
+	}
+	rport, err := rctr.MappedPort(ctx, "6379/tcp")
+	if err != nil {
+		slog.Error("redis port", "error", err)
+		return 1
+	}
+	redisConf = config.Redis{Host: rhost, Port: int(rport.Num()), KeyPrefix: "marpokat-test:"}
 	return m.Run()
+}
+
+// Redis returns the settings of the shared Redis container. Tests stay apart through the ids in their keys.
+func Redis(t *testing.T) config.Redis {
+	t.Helper()
+	if redisConf.Host == "" {
+		t.Fatal("testdb: Main was not called from TestMain")
+	}
+	return redisConf
 }
 
 // Pool returns the shared pool. Only valid inside tests run through Main.
