@@ -1,20 +1,37 @@
 {
   "name": "@rizkysiregar/marpokat-react",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "React hooks for Marpokat chat",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js", "require": "./dist/index.cjs" } },
-  "files": ["dist"],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    }
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
     "build": "tsup src/index.tsx --format esm,cjs --dts --clean --external react --external @rizkysiregar/marpokat-core",
     "test": "vitest run",
     "typecheck": "tsc --noEmit"
   },
-  "peerDependencies": { "@rizkysiregar/marpokat-core": "^0.1.0", "react": ">=18" },
-  "publishConfig": { "registry": "https://npm.pkg.github.com" },
-  "repository": { "type": "git", "url": "git+https://github.com/rizkysiregar/marpokat.git", "directory": "sdk-js/packages/react" },
+  "peerDependencies": {
+    "@rizkysiregar/marpokat-core": "^0.1.1",
+    "react": ">=18"
+  },
+  "publishConfig": {
+    "registry": "https://npm.pkg.github.com"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rizkysiregar/marpokat.git",
+    "directory": "sdk-js/packages/react"
+  },
   "license": "UNLICENSED"
 }

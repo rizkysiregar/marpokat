@@ -515,7 +515,7 @@ lewat FCM memakai kredensial tenant. Payload: `channel_id`, `message_id`, nama p
 - [x] `@rizkysiregar/marpokat-react`: `useChannels`, `useChannel`, `useMessages`, `useSendMessage`, `useMessageActions`, `useTyping`, `useUnreadCount`
 - [x] Cache IndexedDB untuk daftar channel dan 50 pesan terakhir per channel
 - [ ] Publish ke GitHub Packages (perlu token `write:packages` dari pemilik repo)
-- [ ] NV-08
+- [ ] NV-08: kode selesai di narrativ web-client (branch `feat/chat`, menunggu SDK 0.1.1 dipublish dan PR); belum diuji di dev
 - [ ] **Selesai jika:** chat dipakai internal di Narrativ web dev. Sudah terbukti: core terhadap server sungguhan (`sdk-js/packages/core/e2e/live.mjs`, dua klien, termasuk putus koneksi); 22 + 4 tes unit
 
 ### M7: SDK Android + Narrativ Android ⚪

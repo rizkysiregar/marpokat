@@ -231,6 +231,21 @@ describe('messages', () => {
   });
 });
 
+describe('opening before the list is there', () => {
+  it('waits for the channel list instead of failing, and does not sync a channel it never loaded', async () => {
+    client = new MarpokatClient({ baseUrl: 'https://api.test', apiKey: 'k', tokenProvider: async () => 't', WebSocketImpl: FakeSocket as unknown as typeof WebSocket, fetchImpl: env.fetch });
+    await client.connect();
+    await settle();
+    (client as any).current = CH; // the screen asked for it already
+    FakeSocket.all.at(-1)!.push('auth.ok', { user: me, heartbeat_interval_ms: 25000 });
+    await client.openChannel(CH); // runs while the list is still loading
+    await settle();
+    expect(client.getSnapshot().messages[CH]).toHaveLength(2);
+    expect(env.server.calls.filter((c) => c.includes('/sync'))).toHaveLength(0);
+    expect(env.server.calls.filter((c) => c.startsWith('GET /v1/channels?'))).toHaveLength(1);
+  });
+});
+
 describe('sending', () => {
   it('keeps the message pending until the ack and then shows it once', async () => {
     const ws = await start();

@@ -41,6 +41,7 @@ export class MarpokatClient {
   private retryTimer: ReturnType<typeof setTimeout> | undefined;
   private readonly syncTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private syncing = new Map<string, Promise<void>>();
+  private channelsLoading: Promise<void> | null = null;
   private lastTyping = 0;
   private notify = false;
 
@@ -187,7 +188,7 @@ export class MarpokatClient {
     this.setStatus('connected', '');
     try {
       await this.loadChannels(); // what changed in the list (spec 7.4)
-      if (this.current) await this.sync(this.current); // the open channel from its cursor (7.5)
+      if (this.current && this.channels.get(this.current)?.loaded) await this.sync(this.current); // from its cursor (7.5)
     } catch (e) {
       this.setStatus('connected', `sync failed: ${(e as Error).message}`);
     }
@@ -223,7 +224,13 @@ export class MarpokatClient {
     return state;
   }
 
-  async loadChannels(): Promise<void> {
+  /** Loads the channel list. Calls that overlap share one request. */
+  loadChannels(): Promise<void> {
+    this.channelsLoading ??= this.fetchChannels().finally(() => { this.channelsLoading = null; });
+    return this.channelsLoading;
+  }
+
+  private async fetchChannels(): Promise<void> {
     let cursor = '';
     const seen = new Set<string>();
     do {
@@ -245,6 +252,8 @@ export class MarpokatClient {
   /** Makes a channel the open one: loads its latest messages, syncs it and marks it read. */
   async openChannel(id: string): Promise<void> {
     this.current = id;
+    // the screen may open a channel the moment the socket is up, before the list arrived
+    if (!this.channels.has(id)) await this.loadChannels();
     const ch = this.channels.get(id);
     if (!ch) throw new MarpokatError('unknown channel', 'not_found');
     const r = await this.api<{ messages: Message[]; has_more: boolean }>(`/v1/channels/${id}/messages?limit=${this.opt.pageSize}`);
@@ -284,7 +293,7 @@ export class MarpokatClient {
     if (running) return running;
     const p = (async () => {
       const ch = this.channels.get(id);
-      if (!ch) return;
+      if (!ch?.loaded) return; // never loaded: opening it loads the history, and the cursor starts there
       for (;;) {
         const r = await this.api<{ messages: Message[]; next_rev: number; has_more: boolean }>(`/v1/channels/${id}/sync?since_rev=${ch.cursor}&limit=100`);
         for (const m of r.messages) this.storeMessage(id, m);
