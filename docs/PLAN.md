@@ -525,8 +525,8 @@ lewat FCM memakai kredensial tenant. Payload: `channel_id`, `message_id`, nama p
 - [x] State sebagai `StateFlow<ChatState>`, cache Room (channel + 50 pesan terakhir), antrean kirim idempoten, sync
 - [x] Upload attachment dengan progress, reaction, edit, hapus, read, typing
 - [x] Registrasi push token dan `MarpokatPush.parse` untuk payload FCM
-- [ ] Publish ke GitHub Packages (Maven), perlu PAT `write:packages` dari pemilik repo
-- [ ] NV-09
+- [x] Publish ke GitHub Packages (Maven), `marpokat-core` dan `marpokat-android` 0.1.0
+- [ ] NV-09: narrativ-android PR #59 (kode, tes, R8 selesai; belum diuji di perangkat)
 - [ ] **Selesai jika:** chat lintas web ↔ Android di Narrativ dev, push membuka ruang chat yang benar. Sudah terbukti: core terhadap server sungguhan (`LiveServerTest`, dua klien); 22 tes klien + 6 tes OkHttp/MockWebServer + 5 tes push. Cache Room belum punya tes instrumented
 
 ### M8: Hardening dan launch prod ⚪
