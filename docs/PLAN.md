@@ -7,7 +7,7 @@ yang sama dengan tenant lain nanti, tanpa jalan pintas khusus.
 Dokumen ini acuan utama: keputusan arsitektur, tech stack, desain data dan protokol, pekerjaan infra, integrasi Narrativ,
 serta urutan milestone beserta progress tiap item.
 
-- **Status:** M1 selesai (2026-11-22): Narrativ dev menerbitkan chat token dan Marpokat dev menerimanya. Berikutnya M2
+- **Status:** M2 berjalan: kode Marpokat dan Narrativ selesai dan teruji; menunggu build Marpokat M2 di dev dan merge narrativ-backend#82
 - **Dibuat:** 2026-11-22
 - **Target MVP:** chat service yang robust untuk 100–1000 user aktif. DM, group, media, reaction. Belum untuk dijual
 - **Repo terkait:** `marpokat` (monorepo ini), `narrativ-backend`, `narrativ-android`, `narrativ-web-client`, `homelabs-gitops`
@@ -25,7 +25,7 @@ tidak dihapus. Keputusan baru ditambahkan ke bagian 2 dengan nomor berikutnya, d
 | --------- | ---------------------------------------------------------- | -------- |
 | M0        | Fondasi: repo, spec, skema, skeleton Go, CI/CD, deploy dev | ✅ Selesai |
 | M1        | Tenant dan autentikasi                                     | ✅ Selesai |
-| M2        | Messaging inti (DM, group, history, sync, outbox)          | ⚪ Belum |
+| M2        | Messaging inti (DM, group, history, sync, outbox)          | 🟡 Berjalan |
 | M3        | Realtime gateway (WebSocket, fan-out, typing, read)        | ⚪ Belum |
 | M4        | Worker, push notification, retry dan DLQ                   | ⚪ Belum |
 | M5        | Media dan reaction, edit/hapus pesan                       | ⚪ Belum |
@@ -72,6 +72,13 @@ Legenda: ⚪ belum, 🟡 berjalan, ✅ selesai, ⛔ terblokir
 | D29 | **Rotasi secret langsung berlaku** (tanpa masa tenggang), cache auth 30 detik                                                                     | Sederhana untuk satu tenant. Kalau nanti ada tenant eksternal, tambahkan secret sebelumnya dengan masa berlaku                                                                 |
 | D31 | **Foto profil hasil upload Narrativ tidak dikirim ke Marpokat**, hanya URL eksternal (Google). `metadata.username` dikirim supaya app mengambil foto dari profil Narrativ | URL presigned MinIO Narrativ kedaluwarsa dalam 1 jam, sehingga avatar di chat akan rusak. Nanti bisa diganti endpoint avatar Narrativ yang stabil |
 | D30 | **Format kredensial:** api key `mpk_` + 32 hex, api secret `mps_` + 43 karakter base64url (256 bit), webhook secret `mpw_`. Secret dipakai apa adanya sebagai kunci HMAC | Prefix membuat kredensial mudah dikenali (dan mudah dideteksi secret scanner). Tenant cukup menempelkan string secret ke library JWT mereka                                    |
+| D32 | **Profil user di Marpokat disinkronkan saat token dan saat DM dibuka**, bukan lewat hook register/update profil (NV-04 versi awal). Backfill user lama tidak perlu | Setiap user yang bisa chat pasti meminta token atau dibuka DM-nya dulu, jadi tidak ada user "belum terdaftar". Kekurangannya: nama baru terlihat teman chat setelah user itu meminta token lagi. Hook update profil bisa ditambah nanti |
+| D33 | **Daftar id ke query dikirim sebagai teks dipisah koma** (`string_to_array(...)::uuid[]`)                                                          | Driver Postgres dalam simple protocol (wajib karena pgbouncer, D7) tidak bisa meng-encode array uuid. Ditemukan oleh integration test M2                                       |
+| D34 | **View `message_details`** (pesan + profil pengirim) untuk semua jalur baca pesan                                                                  | Satu bentuk hasil dari satu query, tanpa menyalin konversi di tiap query                                                                                                       |
+| D35 | **Unread = jumlah pesan user lain setelah `last_read_seq`, tanpa pesan sistem, maksimal 100**. Mengirim pesan menandai channel terbaca sampai pesan itu. Member baru mulai "sudah membaca semuanya" | Pesan sistem tidak perlu membuat badge. Riwayat sebelum bergabung tidak menjadi unread. Sinkronisasi sendiri tetap lengkap karena memakai `rev_seq`                            |
+| D36 | **Perubahan channel diumumkan sebagai pesan sistem** (`type: system`, `text: null`, `metadata.event`): `channel.created`, `channel.renamed`, `member.added`, `member.left`, `member.removed` | Ikut urutan, history, dan sync tanpa mekanisme tambahan. Teks dirangkai client dalam bahasa user                                                                               |
+| D37 | **Peran `admin` ada di skema dan izin, tapi belum ada endpoint untuk mengangkat admin**                                                            | Di MVP cukup owner dan member. Endpoint promosi ditambah saat dibutuhkan                                                                                                       |
+| D38 | **Pesan terkunci per channel lewat baris `channels`** (`UPDATE ... last_seq + 1`), commit selalu berurutan seq                                      | Pembaca tidak pernah melihat seq N+1 tanpa N, sehingga kursor sync aman. Biayanya: kirim ke satu channel diserialkan, cukup untuk skala target                                  |
 
 ---
 
@@ -376,8 +383,8 @@ lewat FCM memakai kredensial tenant. Payload: `channel_id`, `message_id`, nama p
 | NV-01 | Tenant `narrativ-dev` dibuat lewat CLI, config `client_can_create_dm: false`, `client_can_create_group: true`                          | marpokat CLI             | M1         | [x]    | 2026-11-22, api key `mpk_3d780ec2…` |
 | NV-02 | `MarpokatClient` di backend (server JWT, upsert user; buat DM/group dan freeze menyusul di M2/M5), config `APP_MARPOKAT_*` di configmap + secret | narrativ-backend | M1 | [x] | narrativ-backend#80, gitops 090b2af |
 | NV-03 | `POST /api/v1/chat/token`: upsert user lalu user token Marpokat + api key + base URL. Contract test jjwt ↔ Go lolos                     | narrativ-backend         | M1         | [x]    | narrativ-backend#80 |
-| NV-04 | Upsert user ke Marpokat saat register dan update profil (async lewat RabbitMQ Narrativ), plus backfill sekali untuk user lama          | narrativ-backend         | M2         | [ ]    |     |
-| NV-05 | `POST /api/v1/chat/dm/{userId}`: cek blokir/privasi, lalu buat atau ambil DM di Marpokat                                               | narrativ-backend         | M2         | [ ]    |     |
+| NV-04 | ~~Upsert user saat register/update profil + backfill~~ Diganti D32: upsert saat token dan saat DM dibuka. Hook update profil menyusul bila perlu | narrativ-backend | M2 | [x] | lewat NV-03 dan NV-05 |
+| NV-05 | `POST /api/v1/chat/dm/{userId}`: cek diri sendiri dan blokir (user di sisi blokir dianggap tidak ada), lalu buat atau ambil DM di Marpokat | narrativ-backend | M2 | [ ] | narrativ-backend#82 |
 | NV-06 | Saat user memblokir user lain: freeze channel DM keduanya                                                                              | narrativ-backend         | M5         | [ ]    |     |
 | NV-07 | Kredensial FCM project Firebase Narrativ (dev, lalu prod) disimpan di tenant                                                           | marpokat CLI             | M4         | [ ]    |     |
 | NV-08 | Layar chat web: daftar channel, ruang chat, kirim media, reaction, unread badge, tombol "Kirim pesan" di profil                        | narrativ-web-client      | M6         | [ ]    |     |
@@ -418,17 +425,18 @@ lewat FCM memakai kredensial tenant. Payload: `channel_id`, `message_id`, nama p
 - [x] NV-02, NV-03 (narrativ-backend#80)
 - [x] **Selesai jika:** Narrativ dev bisa upsert user dan memberi token, dan token itu bisa memanggil `GET /me`. Diuji end-to-end di dev (login → `POST /chat/token` → `GET /v1/me` 200; api key salah → 401)
 
-### M2: Messaging inti ⚪
+### M2: Messaging inti 🟡
 
-- [ ] Channel: buat DM (server API, `dm_key`), buat group, detail, update, tambah/keluarkan member, role owner/admin/member
-- [ ] `GET /channels` (urut `last_message_at`, `updated_since`, cursor)
-- [ ] Kirim pesan REST: transaksi seq + message + outbox, idempotensi `client_msg_id`, validasi panjang teks
-- [ ] `GET /messages?before_seq=` dan `GET /sync?since_rev=`
-- [ ] System message (member masuk/keluar, channel dibuat)
-- [ ] `POST /channels/{id}/read`, perhitungan unread
-- [ ] Integration test dengan testcontainers untuk semua alur di atas
-- [ ] NV-04, NV-05
-- [ ] **Selesai jika:** dua user Narrativ dev bisa DM dan group lewat REST, history dan sync benar, test hijau
+- [x] Channel: DM (server API, `dm_key`, satu per pasangan, aman saat dibuat bersamaan), group (client dan server API), detail, ubah nama/avatar, tambah/keluarkan/keluar member, owner pindah otomatis saat keluar, group berakhir saat anggota terakhir keluar, freeze/unfreeze. Peran owner/admin/member (D37)
+- [x] `GET /channels`: urut aktivitas terbaru, `last_message`, `dm_peer`, unread, cursor paging, `updated_since` (termasuk channel yang ditinggalkan)
+- [x] Kirim pesan REST: satu transaksi seq + pesan + outbox, idempotensi `client_msg_id` (termasuk kiriman bersamaan), validasi teks 4000 karakter. Lampiran dan reply ditolak dengan pesan jelas sampai M5
+- [x] `GET /messages?before_seq=` dan `GET /sync?since_rev=` (kursor = `rev_seq` pesan terakhir yang dikembalikan, D38)
+- [x] Pesan sistem untuk perubahan channel (D36) dan `POST /server/channels/{id}/messages`
+- [x] `POST /channels/{id}/read` (hanya maju, dijepit sampai akhir channel) dan perhitungan unread (D35)
+- [x] Integration test (testcontainers, `-race` hijau): DM, unread, group dan izin, riwayat pengumuman, paging dan `updated_since`, isolasi tenant (13 operasi lintas tenant semuanya 404), pengiriman paralel (seq 1..N tanpa celah, satu pesan per `client_msg_id`, satu DM per pasangan). Diuji juga lewat pgbouncer lokal
+- [x] NV-04 (disederhanakan, D32), NV-05 (narrativ-backend#82; contract test Java ↔ Go lolos)
+- [ ] Build M2 live di dev dan narrativ-backend#82 di-merge
+- [ ] **Selesai jika:** dua user Narrativ dev bisa DM dan group lewat REST, history dan sync benar, test hijau. Test hijau sudah, tinggal uji dua akun dev setelah deploy
 
 ### M3: Realtime ⚪
 
@@ -533,3 +541,4 @@ kemungkinan untuk semuanya.
 | 2026-11-22 | M0 dimulai: D22–D26 ditambahkan, progress M0, INF-06/07/10                     |
 | 2026-11-22 | M0 selesai: infra VM dev, repo, Jenkins, Argo CD; dev live                     |
 | 2026-11-22 | M1 selesai: tenant, auth, user API; integrasi Narrativ dev teruji end-to-end   |
+| 2026-11-22 | M2 dikerjakan: D32–D38, channel/pesan/sync/unread, NV-04/05                    |
