@@ -7,7 +7,7 @@ yang sama dengan tenant lain nanti, tanpa jalan pintas khusus.
 Dokumen ini acuan utama: keputusan arsitektur, tech stack, desain data dan protokol, pekerjaan infra, integrasi Narrativ,
 serta urutan milestone beserta progress tiap item.
 
-- **Status:** M0 selesai (dev live di `api-dev-marpokat.rizkysiregar.my.id`). M1 berjalan: sisi Marpokat selesai, berikutnya tenant dev dan integrasi Narrativ
+- **Status:** M1 berjalan: kode Marpokat dan Narrativ selesai dan teruji; menunggu deploy Marpokat ke dev, secret Narrativ, dan merge narrativ-backend#80
 - **Dibuat:** 2026-11-22
 - **Target MVP:** chat service yang robust untuk 100–1000 user aktif. DM, group, media, reaction. Belum untuk dijual
 - **Repo terkait:** `marpokat` (monorepo ini), `narrativ-backend`, `narrativ-android`, `narrativ-web-client`, `homelabs-gitops`
@@ -70,6 +70,7 @@ Legenda: ⚪ belum, 🟡 berjalan, ✅ selesai, ⛔ terblokir
 | D27 | **Kolom `jsonb` dipetakan ke `string` di sqlc**, bukan `[]byte`                                                                                   | Dengan simple protocol (D7, pgbouncer) pgx mengirim `[]byte` sebagai `bytea` dan `jsonb` menolaknya. Ditemukan oleh integration test M1                                        |
 | D28 | **User harus sudah di-upsert sebelum token-nya dipakai.** Token valid untuk user yang tidak ada dijawab `401`. Tenant meng-upsert user tepat sebelum menerbitkan token | Marpokat tidak membuat user sendiri, jadi data profil selalu datang dari tenant. Narrativ melakukannya di endpoint token (NV-03)                                               |
 | D29 | **Rotasi secret langsung berlaku** (tanpa masa tenggang), cache auth 30 detik                                                                     | Sederhana untuk satu tenant. Kalau nanti ada tenant eksternal, tambahkan secret sebelumnya dengan masa berlaku                                                                 |
+| D31 | **Foto profil hasil upload Narrativ tidak dikirim ke Marpokat**, hanya URL eksternal (Google). `metadata.username` dikirim supaya app mengambil foto dari profil Narrativ | URL presigned MinIO Narrativ kedaluwarsa dalam 1 jam, sehingga avatar di chat akan rusak. Nanti bisa diganti endpoint avatar Narrativ yang stabil |
 | D30 | **Format kredensial:** api key `mpk_` + 32 hex, api secret `mps_` + 43 karakter base64url (256 bit), webhook secret `mpw_`. Secret dipakai apa adanya sebagai kunci HMAC | Prefix membuat kredensial mudah dikenali (dan mudah dideteksi secret scanner). Tenant cukup menempelkan string secret ke library JWT mereka                                    |
 
 ---
@@ -372,9 +373,9 @@ lewat FCM memakai kredensial tenant. Payload: `channel_id`, `message_id`, nama p
 
 | ID    | Item                                                                                                                                   | Lokasi                   | Dibutuhkan | Status | Ref |
 | ----- | -------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ | ---------- | ------ | --- |
-| NV-01 | Tenant `narrativ-dev` dibuat lewat CLI, config `client_can_create_dm: false`, `client_can_create_group: true`                          | marpokat CLI             | M1         | [ ]    |     |
-| NV-02 | `MarpokatClient` di backend (server JWT, upsert user, buat DM/group, freeze channel), config `MARPOKAT_*` di configmap + secret        | narrativ-backend         | M1         | [ ]    |     |
-| NV-03 | `POST /api/v1/chat/token`: user token Marpokat untuk user yang login                                                                   | narrativ-backend         | M1         | [ ]    |     |
+| NV-01 | Tenant `narrativ-dev` dibuat lewat CLI, config `client_can_create_dm: false`, `client_can_create_group: true`                          | marpokat CLI             | M1         | [x]    | 2026-11-22, api key `mpk_3d780ec2…` |
+| NV-02 | `MarpokatClient` di backend (server JWT, upsert user; buat DM/group dan freeze menyusul di M2/M5), config `APP_MARPOKAT_*` di configmap + secret | narrativ-backend | M1 | [ ] | narrativ-backend#80, gitops 090b2af |
+| NV-03 | `POST /api/v1/chat/token`: upsert user lalu user token Marpokat + api key + base URL. Contract test jjwt ↔ Go lolos                     | narrativ-backend         | M1         | [ ]    | narrativ-backend#80 |
 | NV-04 | Upsert user ke Marpokat saat register dan update profil (async lewat RabbitMQ Narrativ), plus backfill sekali untuk user lama          | narrativ-backend         | M2         | [ ]    |     |
 | NV-05 | `POST /api/v1/chat/dm/{userId}`: cek blokir/privasi, lalu buat atau ambil DM di Marpokat                                               | narrativ-backend         | M2         | [ ]    |     |
 | NV-06 | Saat user memblokir user lain: freeze channel DM keduanya                                                                              | narrativ-backend         | M5         | [ ]    |     |
@@ -412,7 +413,9 @@ lewat FCM memakai kredensial tenant. Payload: `channel_id`, `message_id`, nama p
 - [x] Middleware server auth (`X-Api-Key` + server JWT, maks 5 menit) dan user auth (user JWT + user harus ada), pesan error yang jelas (algoritma, signature, kedaluwarsa)
 - [x] `PUT/DELETE /v1/server/users/{external_id}`, `GET /v1/me`. Hapus user = anonimisasi + hapus device + keluar dari semua channel (satu transaksi)
 - [x] Semua query user lewat sqlc dengan `tenant_id` + integration test (testcontainers, `make test-integration`): lifecycle user, isolasi tenant, kegagalan auth, rotasi secret, tenant nonaktif, CLI
-- [ ] Tenant Narrativ dev (NV-01), NV-02, NV-03
+- [ ] Build M1 (`615b197`) live di dev. Catatan: push ke `main` belum memicu job Jenkins otomatis (perlu webhook atau Poll SCM)
+- [x] Tenant Narrativ dev (NV-01)
+- [ ] NV-02, NV-03 (narrativ-backend#80 menunggu merge + `APP_MARPOKAT_API_SECRET` di `narrativ-secrets`)
 - [ ] **Selesai jika:** Narrativ dev bisa upsert user dan memberi token, dan token itu bisa memanggil `GET /me`
 
 ### M2: Messaging inti ⚪
