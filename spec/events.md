@@ -55,7 +55,7 @@ client                                   server
 
 ```json
 { "type": "auth", "id": "a-1", "data": {
-    "api_key": "pk_live_...",
+    "api_key": "mpk_...",
     "token": "<user JWT signed by the tenant backend>",
     "protocol_version": 1,
     "client": { "sdk": "marpokat-js", "sdk_version": "0.1.0", "platform": "web" }

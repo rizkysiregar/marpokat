@@ -3,6 +3,7 @@
 //	marpokat api               public REST + WebSocket API
 //	marpokat worker            background jobs (outbox relay, push, webhook, media)
 //	marpokat migrate [action]  database migrations: up (default), down, status
+//	marpokat tenant <command>  manage tenants (create, list, rotate-secret, token, ...)
 //	marpokat version
 package main
 
@@ -29,6 +30,7 @@ commands:
   worker              run background jobs
   migrate [up|down|status]
                       apply database migrations (default: up)
+  tenant <command>    manage tenants, see: marpokat tenant help
   version             print the version
 `
 
@@ -54,6 +56,8 @@ func main() {
 			action = os.Args[2]
 		}
 		err = app.RunMigrate(ctx, info, action)
+	case "tenant":
+		err = app.RunTenant(ctx, os.Args[2:], os.Stdin, os.Stdout)
 	case "version":
 		fmt.Printf("marpokat %s (%s)\n", version, commit)
 	case "help", "-h", "--help":

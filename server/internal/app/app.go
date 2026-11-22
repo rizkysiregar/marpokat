@@ -9,8 +9,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rizkysiregar/marpokat/server/internal/platform/config"
 	"github.com/rizkysiregar/marpokat/server/internal/platform/health"
 	"github.com/rizkysiregar/marpokat/server/internal/platform/metrics"
+	"github.com/rizkysiregar/marpokat/server/internal/platform/secretbox"
 )
 
 // Info identifies the running binary.
@@ -59,4 +61,13 @@ func drainThenStop(ctx context.Context, reg *health.Registry, delay time.Duratio
 		cancel()
 	}()
 	return stopCtx, cancel
+}
+
+// openBox builds the encryption box for tenant secrets from MARPOKAT_MASTER_KEY.
+func openBox(c config.Secrets) (*secretbox.Box, error) {
+	key, err := c.MasterKeyBytes()
+	if err != nil {
+		return nil, err
+	}
+	return secretbox.New(key)
 }

@@ -7,14 +7,58 @@ package store
 
 import (
 	"context"
+
+	"github.com/google/uuid"
 )
 
-const getTenantByAPIKey = `-- name: GetTenantByAPIKey :one
+const createTenant = `-- name: CreateTenant :one
 
+INSERT INTO tenants (id, slug, name, api_key, api_secret_enc, config)
+VALUES ($1, $2, $3, $4, $5, $6)
+RETURNING id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at
+`
+
+type CreateTenantParams struct {
+	ID           uuid.UUID
+	Slug         string
+	Name         string
+	ApiKey       string
+	ApiSecretEnc []byte
+	Config       string
+}
+
+// The tenants table is the only one queried without tenant_id (PLAN D1).
+func (q *Queries) CreateTenant(ctx context.Context, arg CreateTenantParams) (Tenant, error) {
+	row := q.db.QueryRow(ctx, createTenant,
+		arg.ID,
+		arg.Slug,
+		arg.Name,
+		arg.ApiKey,
+		arg.ApiSecretEnc,
+		arg.Config,
+	)
+	var i Tenant
+	err := row.Scan(
+		&i.ID,
+		&i.Slug,
+		&i.Name,
+		&i.ApiKey,
+		&i.ApiSecretEnc,
+		&i.Config,
+		&i.FcmCredentialsEnc,
+		&i.WebhookUrl,
+		&i.WebhookSecretEnc,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.DisabledAt,
+	)
+	return i, err
+}
+
+const getTenantByAPIKey = `-- name: GetTenantByAPIKey :one
 SELECT id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at FROM tenants WHERE api_key = $1 AND disabled_at IS NULL
 `
 
-// Every query on tenant data takes tenant_id (PLAN D1). The tenants table itself is the only exception.
 func (q *Queries) GetTenantByAPIKey(ctx context.Context, apiKey string) (Tenant, error) {
 	row := q.db.QueryRow(ctx, getTenantByAPIKey, apiKey)
 	var i Tenant
@@ -57,4 +101,129 @@ func (q *Queries) GetTenantBySlug(ctx context.Context, slug string) (Tenant, err
 		&i.DisabledAt,
 	)
 	return i, err
+}
+
+const listTenants = `-- name: ListTenants :many
+SELECT id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at FROM tenants ORDER BY created_at
+`
+
+func (q *Queries) ListTenants(ctx context.Context) ([]Tenant, error) {
+	rows, err := q.db.Query(ctx, listTenants)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []Tenant{}
+	for rows.Next() {
+		var i Tenant
+		if err := rows.Scan(
+			&i.ID,
+			&i.Slug,
+			&i.Name,
+			&i.ApiKey,
+			&i.ApiSecretEnc,
+			&i.Config,
+			&i.FcmCredentialsEnc,
+			&i.WebhookUrl,
+			&i.WebhookSecretEnc,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.DisabledAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const setTenantDisabled = `-- name: SetTenantDisabled :execrows
+UPDATE tenants
+SET disabled_at = CASE WHEN $2::boolean THEN coalesce(disabled_at, now()) ELSE NULL END
+WHERE id = $1
+`
+
+type SetTenantDisabledParams struct {
+	ID       uuid.UUID
+	Disabled bool
+}
+
+func (q *Queries) SetTenantDisabled(ctx context.Context, arg SetTenantDisabledParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setTenantDisabled, arg.ID, arg.Disabled)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const updateTenantConfig = `-- name: UpdateTenantConfig :execrows
+UPDATE tenants SET config = $2 WHERE id = $1
+`
+
+type UpdateTenantConfigParams struct {
+	ID     uuid.UUID
+	Config string
+}
+
+func (q *Queries) UpdateTenantConfig(ctx context.Context, arg UpdateTenantConfigParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateTenantConfig, arg.ID, arg.Config)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const updateTenantFCMCredentials = `-- name: UpdateTenantFCMCredentials :execrows
+UPDATE tenants SET fcm_credentials_enc = $2 WHERE id = $1
+`
+
+type UpdateTenantFCMCredentialsParams struct {
+	ID                uuid.UUID
+	FcmCredentialsEnc []byte
+}
+
+func (q *Queries) UpdateTenantFCMCredentials(ctx context.Context, arg UpdateTenantFCMCredentialsParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateTenantFCMCredentials, arg.ID, arg.FcmCredentialsEnc)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const updateTenantSecret = `-- name: UpdateTenantSecret :execrows
+UPDATE tenants SET api_secret_enc = $2 WHERE id = $1
+`
+
+type UpdateTenantSecretParams struct {
+	ID           uuid.UUID
+	ApiSecretEnc []byte
+}
+
+func (q *Queries) UpdateTenantSecret(ctx context.Context, arg UpdateTenantSecretParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateTenantSecret, arg.ID, arg.ApiSecretEnc)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const updateTenantWebhook = `-- name: UpdateTenantWebhook :execrows
+UPDATE tenants SET webhook_url = $2, webhook_secret_enc = $3 WHERE id = $1
+`
+
+type UpdateTenantWebhookParams struct {
+	ID               uuid.UUID
+	WebhookUrl       *string
+	WebhookSecretEnc []byte
+}
+
+func (q *Queries) UpdateTenantWebhook(ctx context.Context, arg UpdateTenantWebhookParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateTenantWebhook, arg.ID, arg.WebhookUrl, arg.WebhookSecretEnc)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }

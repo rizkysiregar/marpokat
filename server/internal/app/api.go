@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"fmt"
-	"net/http"
 
 	"golang.org/x/sync/errgroup"
 
@@ -19,6 +18,7 @@ type apiConfig struct {
 	Server   config.Server
 	Postgres config.Postgres
 	Redis    config.Redis
+	Secrets  config.Secrets
 }
 
 // RunAPI serves the public REST + WebSocket API until ctx is cancelled.
@@ -28,6 +28,10 @@ func RunAPI(ctx context.Context, info Info) error {
 		return err
 	}
 	log := NewLogger(cfg.Server.LogLevel, "api", info)
+	box, err := openBox(cfg.Secrets)
+	if err != nil {
+		return err
+	}
 
 	pool, err := db.Open(ctx, cfg.Postgres)
 	if err != nil {
@@ -46,7 +50,7 @@ func RunAPI(ctx context.Context, info Info) error {
 	reg.Add("redis", func(ctx context.Context) error { return rdb.Ping(ctx).Err() })
 	m := metrics.New(info.Version)
 
-	public := httpx.NewServer(cfg.Server.HTTPAddr, httpx.Chain(publicRoutes(info),
+	public := httpx.NewServer(cfg.Server.HTTPAddr, httpx.Chain(PublicRoutes(Deps{Info: info, Pool: pool, Box: box, Log: log}),
 		httpx.WithRequestID(),
 		httpx.WithObservability(log, m),
 		httpx.WithRecover(log),
@@ -64,16 +68,4 @@ func RunAPI(ctx context.Context, info Info) error {
 	}
 	log.Info("api stopped")
 	return nil
-}
-
-// publicRoutes is the public router. Feature modules register their routes here from M1 on.
-func publicRoutes(info Info) http.Handler {
-	mux := http.NewServeMux()
-	// reachable through Cloudflare, used to check the tunnel and ingress; no dependency checks
-	mux.HandleFunc("GET /healthz", health.LiveHandler)
-	mux.HandleFunc("GET /v1", func(w http.ResponseWriter, _ *http.Request) {
-		httpx.WriteJSON(w, http.StatusOK, map[string]string{"name": "marpokat", "version": info.Version})
-	})
-	mux.HandleFunc("/", httpx.NotFound)
-	return mux
 }

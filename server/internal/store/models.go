@@ -75,10 +75,10 @@ type Message struct {
 	ClientMsgID    *string
 	Type           string
 	Text           *string
-	Attachments    []byte
+	Attachments    string
 	ReplyToID      uuid.NullUUID
-	ReactionCounts []byte
-	Metadata       []byte
+	ReactionCounts string
+	Metadata       string
 	RevSeq         int64
 	EditedAt       *time.Time
 	DeletedAt      *time.Time
@@ -97,7 +97,7 @@ type Outbox struct {
 	EventID     uuid.UUID
 	TenantID    uuid.UUID
 	Topic       string
-	Payload     []byte
+	Payload     string
 	CreatedAt   time.Time
 	PublishedAt *time.Time
 	Attempts    int32
@@ -110,7 +110,7 @@ type Tenant struct {
 	Name              string
 	ApiKey            string
 	ApiSecretEnc      []byte
-	Config            []byte
+	Config            string
 	FcmCredentialsEnc []byte
 	WebhookUrl        *string
 	WebhookSecretEnc  []byte
@@ -125,7 +125,7 @@ type User struct {
 	ExternalID string
 	Name       string
 	AvatarUrl  *string
-	Metadata   []byte
+	Metadata   string
 	CreatedAt  time.Time
 	UpdatedAt  time.Time
 	DeletedAt  *time.Time

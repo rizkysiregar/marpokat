@@ -6,12 +6,29 @@ package store
 
 import (
 	"context"
+
+	"github.com/google/uuid"
 )
 
 type Querier interface {
-	// Every query on tenant data takes tenant_id (PLAN D1). The tenants table itself is the only exception.
+	// Messages keep pointing at the row, so conversations keep their shape; the personal data goes.
+	AnonymizeUser(ctx context.Context, arg AnonymizeUserParams) (uuid.UUID, error)
+	// The tenants table is the only one queried without tenant_id (PLAN D1).
+	CreateTenant(ctx context.Context, arg CreateTenantParams) (Tenant, error)
+	DeleteUserDevices(ctx context.Context, arg DeleteUserDevicesParams) error
 	GetTenantByAPIKey(ctx context.Context, apiKey string) (Tenant, error)
 	GetTenantBySlug(ctx context.Context, slug string) (Tenant, error)
+	GetUserByExternalID(ctx context.Context, arg GetUserByExternalIDParams) (User, error)
+	GetUserIDByExternalID(ctx context.Context, arg GetUserIDByExternalIDParams) (uuid.UUID, error)
+	LeaveAllChannels(ctx context.Context, arg LeaveAllChannelsParams) error
+	ListTenants(ctx context.Context) ([]Tenant, error)
+	SetTenantDisabled(ctx context.Context, arg SetTenantDisabledParams) (int64, error)
+	UpdateTenantConfig(ctx context.Context, arg UpdateTenantConfigParams) (int64, error)
+	UpdateTenantFCMCredentials(ctx context.Context, arg UpdateTenantFCMCredentialsParams) (int64, error)
+	UpdateTenantSecret(ctx context.Context, arg UpdateTenantSecretParams) (int64, error)
+	UpdateTenantWebhook(ctx context.Context, arg UpdateTenantWebhookParams) (int64, error)
+	// Re-upserting a deleted user brings it back: the tenant decides who exists.
+	UpsertUser(ctx context.Context, arg UpsertUserParams) (User, error)
 }
 
 var _ Querier = (*Queries)(nil)

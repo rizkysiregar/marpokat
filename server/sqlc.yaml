@@ -21,6 +21,15 @@ sql:
             go_type:
               import: github.com/google/uuid
               type: NullUUID
+          # jsonb as string, never []byte: with the simple protocol (required by pgbouncer, see db.Open) pgx sends
+          # []byte as bytea ('\x7b...'), which jsonb rejects. A string goes as a text literal that casts to jsonb.
+          - db_type: jsonb
+            go_type: string
+          - db_type: jsonb
+            nullable: true
+            go_type:
+              type: string
+              pointer: true
           - db_type: text
             nullable: true
             go_type:

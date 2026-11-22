@@ -94,6 +94,10 @@ paths:
     get:
       tags: [Me]
       summary: The authenticated user
+      description: |
+        The user must have been created by the tenant backend (`PUT /v1/server/users/{external_id}`); a valid token
+        for an unknown or deleted user is answered with `401 unauthenticated`. Tenant backends should upsert the user
+        right before issuing its token.
       operationId: getMe
       responses:
         "200":
@@ -846,9 +850,9 @@ components:
 
     UpsertUserRequest:
       type: object
-      required: [name]
+      description: Replaces the user's profile. Omitted fields are cleared (empty name, no avatar, empty metadata).
       properties:
-        name: { type: string, maxLength: 100 }
+        name: { type: string, maxLength: 100, description: "Display name, trimmed." }
         avatar_url: { type: [string, "null"], format: uri }
         metadata:
           type: object

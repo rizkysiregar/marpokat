@@ -19,6 +19,10 @@ help: ## list targets
 test: ## unit tests (no external dependencies)
 	go test ./...
 
+.PHONY: test-integration
+test-integration: ## integration tests against a real Postgres (Docker, testcontainers)
+	go test -tags integration -count=1 ./...
+
 .PHONY: test-race
 test-race: ## unit tests with the race detector
 	go test -race ./...

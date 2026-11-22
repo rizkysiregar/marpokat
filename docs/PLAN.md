@@ -7,7 +7,7 @@ yang sama dengan tenant lain nanti, tanpa jalan pintas khusus.
 Dokumen ini acuan utama: keputusan arsitektur, tech stack, desain data dan protokol, pekerjaan infra, integrasi Narrativ,
 serta urutan milestone beserta progress tiap item.
 
-- **Status:** M0 berjalan: kode, spec, manifest, dan infra VM dev selesai; menunggu secret cluster, Jenkins, dan Argo CD
+- **Status:** M0 selesai (dev live di `api-dev-marpokat.rizkysiregar.my.id`). M1 berjalan: sisi Marpokat selesai, berikutnya tenant dev dan integrasi Narrativ
 - **Dibuat:** 2026-11-22
 - **Target MVP:** chat service yang robust untuk 100–1000 user aktif. DM, group, media, reaction. Belum untuk dijual
 - **Repo terkait:** `marpokat` (monorepo ini), `narrativ-backend`, `narrativ-android`, `narrativ-web-client`, `homelabs-gitops`
@@ -23,8 +23,8 @@ tidak dihapus. Keputusan baru ditambahkan ke bagian 2 dengan nomor berikutnya, d
 
 | Milestone | Isi                                                        | Status   |
 | --------- | ---------------------------------------------------------- | -------- |
-| M0        | Fondasi: repo, spec, skema, skeleton Go, CI/CD, deploy dev | 🟡 Berjalan |
-| M1        | Tenant dan autentikasi                                     | ⚪ Belum |
+| M0        | Fondasi: repo, spec, skema, skeleton Go, CI/CD, deploy dev | ✅ Selesai |
+| M1        | Tenant dan autentikasi                                     | 🟡 Berjalan |
 | M2        | Messaging inti (DM, group, history, sync, outbox)          | ⚪ Belum |
 | M3        | Realtime gateway (WebSocket, fan-out, typing, read)        | ⚪ Belum |
 | M4        | Worker, push notification, retry dan DLQ                   | ⚪ Belum |
@@ -67,6 +67,10 @@ Legenda: ⚪ belum, 🟡 berjalan, ✅ selesai, ⛔ terblokir
 | D24 | **Readiness memeriksa dependency** (Postgres, Redis, RabbitMQ untuk worker), liveness tidak                                                       | Infra VM bermasalah membuat pod tidak menerima traffic, bukan restart berulang                                                                                                 |
 | D25 | **Migrasi goose tanpa lock**, dijalankan sebagai Job PreSync Argo CD                                                                               | Locker goose memakai session advisory lock yang tidak bisa lewat pgbouncer mode transaction. Hanya satu Job yang jalan                                                        |
 | D26 | **Spec dalam bahasa Inggris** (`openapi.yaml`, `events.md`); PLAN tetap bahasa Indonesia                                                           | Spec adalah dokumen untuk developer tenant, termasuk pihak luar nanti                                                                                                          |
+| D27 | **Kolom `jsonb` dipetakan ke `string` di sqlc**, bukan `[]byte`                                                                                   | Dengan simple protocol (D7, pgbouncer) pgx mengirim `[]byte` sebagai `bytea` dan `jsonb` menolaknya. Ditemukan oleh integration test M1                                        |
+| D28 | **User harus sudah di-upsert sebelum token-nya dipakai.** Token valid untuk user yang tidak ada dijawab `401`. Tenant meng-upsert user tepat sebelum menerbitkan token | Marpokat tidak membuat user sendiri, jadi data profil selalu datang dari tenant. Narrativ melakukannya di endpoint token (NV-03)                                               |
+| D29 | **Rotasi secret langsung berlaku** (tanpa masa tenggang), cache auth 30 detik                                                                     | Sederhana untuk satu tenant. Kalau nanti ada tenant eksternal, tambahkan secret sebelumnya dengan masa berlaku                                                                 |
+| D30 | **Format kredensial:** api key `mpk_` + 32 hex, api secret `mps_` + 43 karakter base64url (256 bit), webhook secret `mpw_`. Secret dipakai apa adanya sebagai kunci HMAC | Prefix membuat kredensial mudah dikenali (dan mudah dideteksi secret scanner). Tenant cukup menempelkan string secret ke library JWT mereka                                    |
 
 ---
 
@@ -346,17 +350,17 @@ lewat FCM memakai kredensial tenant. Payload: `channel_id`, `message_id`, nama p
 
 | ID     | Item                                                                                                                         | Lokasi              | Dibutuhkan | Status | Ref |
 | ------ | ---------------------------------------------------------------------------------------------------------------------------- | ------------------- | ---------- | ------ | --- |
-| INF-01 | Repo GitHub `marpokat` + GHCR image `marpokat-server`                                                                        | GitHub              | M0         | [ ]    |     |
+| INF-01 | Repo GitHub `marpokat` (private) + GHCR image `marpokat-server`                                                              | GitHub              | M0         | [x]    | b93975e |
 | INF-02 | Postgres dev: role + database `marpokat_dev` (owner role tersebut). Alias pgbouncer tidak perlu: entri `*` sudah mengarah ke postgres-dev | infra VM | M0 | [x] | 2026-11-22, migrasi 00001 sudah jalan |
 | INF-03 | RabbitMQ: vhost `/marpokat-dev` + user `marpokat_dev` dengan izin configure/write/read                                       | infra VM            | M0         | [x]    | 2026-11-22 |
 | INF-04 | MinIO: bucket `marpokat-media-dev` + user `marpokat-dev` dengan policy terbatas bucket tersebut (selesai 2026-11-22). Sisa: aturan CORS untuk origin web | infra VM | M5 | [ ] | bucket + user selesai |
 | INF-05 | Redis dev: pakai `infra-redis` (6379, tanpa password) dengan prefix `marpokat:` (D20)                                        | infra VM            | M0         | [x]    | tidak ada yang perlu dibuat |
-| INF-06 | `homelabs-gitops/apps/marpokat-dev`: namespace, configmap, deployment `api` (2 replika) + `worker`, service, ingress, Job migrate (PreSync), kustomization, README langkah setup | gitops | M0 | [ ] | ditulis, belum di-commit/push |
+| INF-06 | `homelabs-gitops/apps/marpokat-dev`: namespace, configmap, deployment `api` (2 replika) + `worker`, service, ingress, Job migrate (hook Sync, wave 0), kustomization, README langkah setup | gitops | M0 | [x] | gitops 87d6161, 2df4348 |
 | INF-07 | Ingress WebSocket: `proxy-read-timeout` dan `proxy-send-timeout` `3600`                                                      | gitops ingress      | M3         | [x]    | ikut INF-06 |
 | INF-08 | Cloudflare Tunnel hostname `api-dev-marpokat.rizkysiregar.my.id` ke origin ingress-nginx                                     | Cloudflare          | M0         | [x]    | 2026-11-22 |
-| INF-09 | Secret `marpokat-secrets` di namespace dev (DB, Redis, RabbitMQ, MinIO, master key enkripsi), `ghcr-pull`                    | kubectl             | M0         | [ ]    |     |
-| INF-10 | Jenkinsfile: test (gofmt, vet, test), build image, push GHCR, update tag di `apps/marpokat-dev`. Pipeline Jenkins dibuat dengan Script Path `server/Jenkinsfile` | `server/Jenkinsfile`| M0 | [ ] | file selesai, pipeline belum dibuat |
-| INF-11 | Argo CD Application `marpokat-dev` (auto-sync)                                                                               | Argo CD             | M0         | [ ]    |     |
+| INF-09 | Secret `marpokat-secrets` di namespace dev (DB, Redis, RabbitMQ, MinIO, master key enkripsi), `ghcr-pull`                    | kubectl             | M0         | [x]    | 2026-11-22 |
+| INF-10 | Jenkinsfile: test (gofmt, vet, test), build image, push GHCR, update tag di `apps/marpokat-dev`. Pipeline Jenkins dibuat dengan Script Path `server/Jenkinsfile` | `server/Jenkinsfile`| M0 | [x] | build pertama b93975eec3a5 |
+| INF-11 | Argo CD Application `marpokat-dev` (auto-sync)                                                                               | Argo CD             | M0         | [x]    | 2026-11-22 |
 | INF-12 | Prod: database `marpokat` di `infra-postgres-prod`, vhost `/marpokat`, bucket `marpokat-media`, Redis prod 6380 prefix        | infra VM            | M8         | [ ]    |     |
 | INF-13 | `apps/marpokat` (prod, manual sync, promosi tag lewat PR) + hostname `api-marpokat.rizkysiregar.my.id` + Argo Application    | gitops + Cloudflare | M8         | [ ]    |     |
 | INF-14 | Dashboard Grafana (koneksi WS, pesan/detik, latensi kirim, panjang queue, isi DLQ) + alert DLQ tidak kosong                  | monitoring          | M8         | [ ]    |     |
@@ -383,10 +387,10 @@ lewat FCM memakai kredensial tenant. Payload: `channel_id`, `message_id`, nama p
 
 ## 12. Milestone
 
-### M0: Fondasi 🟡
+### M0: Fondasi ✅
 
 - [x] Inisialisasi git (branch `main`), README, LICENSE, `.editorconfig`, `.gitignore`
-- [ ] Commit awal + repo GitHub `marpokat` (INF-01)
+- [x] Commit awal + repo GitHub `marpokat` (INF-01, private)
 - [x] `spec/openapi.yaml` draft v1: semua endpoint bagian 7, schema error seragam, batas v1. Lolos `redocly lint` (`spec/redocly.yaml`)
 - [x] `spec/events.md` draft v1: amplop, lifecycle, heartbeat, request, event, ordering/gap/sync, reconnect, kode error, close code, batas, payload push dan webhook
 - [x] Migrasi awal skema bagian 6 (`00001_init.sql`), ditambah `attachments.file_name` dan status `processing`. Diuji up → down → up lewat pgbouncer transaction mode
@@ -397,17 +401,17 @@ lewat FCM memakai kredensial tenant. Payload: `channel_id`, `message_id`, nama p
 - [x] Dockerfile (multi-stage, distroless, UID 10001), image 27 MB, `migrate` dari container berhasil
 - [x] Unit test: config, httpx, health, rabbitmq, redisx, drain shutdown (`go test -race` hijau)
 - [x] Infra dev: INF-02, INF-03, INF-05, INF-08. Diuji dari laptop: migrate, api, dan worker ke infra VM dev semua `ok`, MinIO terbuka dengan key terbatas
-- [ ] Secret cluster INF-09 (`marpokat-secrets`, `ghcr-pull`)
-- [ ] Jenkinsfile (INF-10, file selesai), gitops `apps/marpokat-dev` (INF-06, ditulis), Argo Application (INF-11)
-- [ ] **Selesai jika:** `https://api-dev-marpokat.rizkysiregar.my.id/healthz` menjawab 200 lewat Cloudflare dan migrasi jalan otomatis
+- [x] Secret cluster INF-09 (`marpokat-secrets`, `ghcr-pull`)
+- [x] Jenkinsfile (INF-10), gitops `apps/marpokat-dev` (INF-06), Argo Application (INF-11). Catatan: Job migrate awalnya PreSync, gagal `CreateContainerConfigError` karena ConfigMap belum ada saat sync pertama; diganti hook Sync dengan sync-wave
+- [x] **Selesai jika:** `https://api-dev-marpokat.rizkysiregar.my.id/healthz` menjawab 200 lewat Cloudflare dan migrasi jalan otomatis (2026-11-22, versi `b93975eec3a5`)
 
-### M1: Tenant dan autentikasi ⚪
+### M1: Tenant dan autentikasi 🟡
 
-- [ ] Modul `tenant`: model, enkripsi secret (AES-GCM, master key env), config jsonb
-- [ ] CLI `marpokat tenant create|list|rotate-secret|set-config|set-fcm|set-webhook`
-- [ ] Middleware server auth (`X-Api-Key` + server JWT) dan user auth (user JWT)
-- [ ] `PUT/DELETE /server/users/{externalId}`, `GET /me`
-- [ ] Helper repository yang mewajibkan `tenantID` + test isolasi tenant
+- [x] Modul `tenant`: model, enkripsi secret (`platform/secretbox`, AES-256-GCM dengan konteks per kolom), config jsonb, cache api key 30 detik (`tenant.Resolver`, juga cache negatif 10 detik)
+- [x] CLI `marpokat tenant create|list|show|rotate-secret|set-config|set-fcm|set-webhook|disable|enable|token`
+- [x] Middleware server auth (`X-Api-Key` + server JWT, maks 5 menit) dan user auth (user JWT + user harus ada), pesan error yang jelas (algoritma, signature, kedaluwarsa)
+- [x] `PUT/DELETE /v1/server/users/{external_id}`, `GET /v1/me`. Hapus user = anonimisasi + hapus device + keluar dari semua channel (satu transaksi)
+- [x] Semua query user lewat sqlc dengan `tenant_id` + integration test (testcontainers, `make test-integration`): lifecycle user, isolasi tenant, kegagalan auth, rotasi secret, tenant nonaktif, CLI
 - [ ] Tenant Narrativ dev (NV-01), NV-02, NV-03
 - [ ] **Selesai jika:** Narrativ dev bisa upsert user dan memberi token, dan token itu bisa memanggil `GET /me`
 
@@ -524,3 +528,4 @@ kemungkinan untuk semuanya.
 | ---------- | ------------------------------------------------------------------------------ |
 | 2026-11-22 | Dokumen dibuat: keputusan D1–D21, tech stack, desain, infra, milestone M0–M8   |
 | 2026-11-22 | M0 dimulai: D22–D26 ditambahkan, progress M0, INF-06/07/10                     |
+| 2026-11-22 | M0 selesai: infra VM dev, repo, Jenkins, Argo CD; dev live                     |
