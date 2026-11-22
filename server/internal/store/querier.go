@@ -11,18 +11,62 @@ import (
 )
 
 type Querier interface {
+	// Adds the user, or brings back one who left. 0 rows: already an active member.
+	AddMember(ctx context.Context, arg AddMemberParams) (int64, error)
 	// Messages keep pointing at the row, so conversations keep their shape; the personal data goes.
 	AnonymizeUser(ctx context.Context, arg AnonymizeUserParams) (uuid.UUID, error)
+	// Takes the next value of the channel counter for a new message (PLAN D8). The row lock it takes is held until the
+	// transaction ends, so sends to one channel commit in seq order and a reader never sees seq N+1 without N.
+	// With check_frozen, a frozen channel matches nothing.
+	BumpChannelSeq(ctx context.Context, arg BumpChannelSeqParams) (BumpChannelSeqRow, error)
+	CountActiveMembers(ctx context.Context, arg CountActiveMembersParams) (int32, error)
 	// The tenants table is the only one queried without tenant_id (PLAN D1).
 	CreateTenant(ctx context.Context, arg CreateTenantParams) (Tenant, error)
 	DeleteUserDevices(ctx context.Context, arg DeleteUserDevicesParams) error
+	GetChannel(ctx context.Context, arg GetChannelParams) (Channel, error)
+	GetChannelByDMKey(ctx context.Context, arg GetChannelByDMKeyParams) (Channel, error)
+	GetMember(ctx context.Context, arg GetMemberParams) (GetMemberRow, error)
+	GetMessageByClientID(ctx context.Context, arg GetMessageByClientIDParams) (MessageDetail, error)
+	GetMessageBySeq(ctx context.Context, arg GetMessageBySeqParams) (MessageDetail, error)
 	GetTenantByAPIKey(ctx context.Context, apiKey string) (Tenant, error)
 	GetTenantBySlug(ctx context.Context, slug string) (Tenant, error)
 	GetUserByExternalID(ctx context.Context, arg GetUserByExternalIDParams) (User, error)
+	GetUserByID(ctx context.Context, arg GetUserByIDParams) (User, error)
 	GetUserIDByExternalID(ctx context.Context, arg GetUserIDByExternalIDParams) (uuid.UUID, error)
+	GetUsersByExternalIDs(ctx context.Context, arg GetUsersByExternalIDsParams) ([]User, error)
+	// Every query takes tenant_id (PLAN D1).
+	// For a DM that already exists nothing is inserted and no row comes back (the caller loads it by dm_key).
+	InsertChannel(ctx context.Context, arg InsertChannelParams) (Channel, error)
+	InsertMessage(ctx context.Context, arg InsertMessageParams) error
+	InsertOutbox(ctx context.Context, arg InsertOutboxParams) error
 	LeaveAllChannels(ctx context.Context, arg LeaveAllChannelsParams) error
+	// The other member of each given DM, as seen by user_id. channel_ids is a comma separated list: with the simple
+	// protocol (pgbouncer) the driver cannot encode a uuid array, and a string it can.
+	ListDMPeers(ctx context.Context, arg ListDMPeersParams) ([]ListDMPeersRow, error)
+	// channel_ids is a comma separated list, see ListDMPeers.
+	ListLastMessages(ctx context.Context, arg ListLastMessagesParams) ([]MessageDetail, error)
+	ListMemberExternalIDs(ctx context.Context, arg ListMemberExternalIDsParams) ([]string, error)
+	ListMembers(ctx context.Context, arg ListMembersParams) ([]ListMembersRow, error)
+	// History, newest first. before_seq 0 means from the latest.
+	ListMessages(ctx context.Context, arg ListMessagesParams) ([]MessageDetail, error)
 	ListTenants(ctx context.Context) ([]Tenant, error)
+	// The channels of one user, newest activity first. Without since only active memberships; with since the channels
+	// changed after it, including those the user left (the client drops them from its cache). channel_id narrows it to one.
+	ListUserChannels(ctx context.Context, arg ListUserChannelsParams) ([]ListUserChannelsRow, error)
+	// Serialises changes to one channel (members, name, sends) until the transaction ends.
+	LockChannel(ctx context.Context, arg LockChannelParams) (Channel, error)
+	// Moves the read marker forward only, and never past the end of the channel.
+	MarkRead(ctx context.Context, arg MarkReadParams) (int64, error)
+	// Oldest admin, else the oldest member.
+	PickNextOwner(ctx context.Context, arg PickNextOwnerParams) (uuid.UUID, error)
+	RemoveMember(ctx context.Context, arg RemoveMemberParams) (int64, error)
+	SetChannelFrozen(ctx context.Context, arg SetChannelFrozenParams) (int64, error)
+	SetMemberRole(ctx context.Context, arg SetMemberRoleParams) error
 	SetTenantDisabled(ctx context.Context, arg SetTenantDisabledParams) (int64, error)
+	SoftDeleteChannel(ctx context.Context, arg SoftDeleteChannelParams) error
+	// Everything that changed after the cursor, oldest change first (PLAN D8).
+	SyncMessages(ctx context.Context, arg SyncMessagesParams) ([]MessageDetail, error)
+	UpdateChannelProfile(ctx context.Context, arg UpdateChannelProfileParams) (Channel, error)
 	UpdateTenantConfig(ctx context.Context, arg UpdateTenantConfigParams) (int64, error)
 	UpdateTenantFCMCredentials(ctx context.Context, arg UpdateTenantFCMCredentialsParams) (int64, error)
 	UpdateTenantSecret(ctx context.Context, arg UpdateTenantSecretParams) (int64, error)

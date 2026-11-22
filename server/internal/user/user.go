@@ -67,6 +67,12 @@ func ValidateExternalID(id string) error {
 	return nil
 }
 
+// IsHTTPURL reports whether s is an absolute http or https URL.
+func IsHTTPURL(s string) bool {
+	u, err := url.Parse(s)
+	return err == nil && (u.Scheme == "https" || u.Scheme == "http") && u.Host != ""
+}
+
 // Validate normalises the input and returns field errors (httpx.FieldErrors) when it is not acceptable.
 func (in *UpsertInput) Validate() error {
 	errs := httpx.FieldErrors{}
@@ -78,7 +84,7 @@ func (in *UpsertInput) Validate() error {
 		v := strings.TrimSpace(*in.AvatarURL)
 		if v == "" {
 			in.AvatarURL = nil
-		} else if u, err := url.Parse(v); err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || len(v) > maxAvatarURL {
+		} else if !IsHTTPURL(v) || len(v) > maxAvatarURL {
 			errs["avatar_url"] = fmt.Sprintf("must be an absolute http(s) URL of at most %d characters", maxAvatarURL)
 		} else {
 			in.AvatarURL = &v

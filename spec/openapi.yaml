@@ -112,6 +112,8 @@ paths:
       tags: [Channels]
       summary: Channels of the authenticated user
       description: |
+        Each channel carries `last_message` and, for DMs, `dm_peer`.
+
         Sorted by `last_message_at` descending (channels without messages by `created_at`). With `updated_since`
         only channels changed after that time are returned, including ones the user left or was removed from
         (`membership.left_at` set), so the client can drop them from its cache.
@@ -973,7 +975,9 @@ components:
     SendMessageRequest:
       type: object
       required: [client_msg_id]
-      description: At least one of text or attachment_ids.
+      description: |
+        Text is required for now. `attachment_ids` and `reply_to_id` are refused with `validation_failed` until media
+        and replies are supported. Text is trimmed.
       properties:
         client_msg_id: { type: string, minLength: 1, maxLength: 64, description: "Unique per sender and channel, UUID recommended." }
         text: { type: string, maxLength: 4000 }
@@ -985,6 +989,13 @@ components:
 
     Message:
       type: object
+      description: |
+        `type` is `text`, `media` or `system`. System messages have no sender and report something that happened in the
+        channel: `text` is null (or set by the tenant backend for its own announcements) and `metadata.event` says what
+        happened, so clients word it themselves in the language of their user. Events: `channel.created`
+        (`actor_id`, `name`), `channel.renamed` (`actor_id`, `name`), `member.added` (`actor_id` when a user did it,
+        `user_ids`), `member.left` (`user_id`) and `member.removed` (`user_id`, `actor_id` when a user did it). All ids
+        are external user ids. System messages never count as unread.
       required: [id, channel_id, seq, rev_seq, type, created_at, reactions]
       properties:
         id: { type: string, format: uuid }

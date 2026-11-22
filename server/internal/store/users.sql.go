@@ -72,6 +72,32 @@ func (q *Queries) GetUserByExternalID(ctx context.Context, arg GetUserByExternal
 	return i, err
 }
 
+const getUserByID = `-- name: GetUserByID :one
+SELECT id, tenant_id, external_id, name, avatar_url, metadata, created_at, updated_at, deleted_at FROM users WHERE id = $1 AND tenant_id = $2
+`
+
+type GetUserByIDParams struct {
+	ID       uuid.UUID
+	TenantID uuid.UUID
+}
+
+func (q *Queries) GetUserByID(ctx context.Context, arg GetUserByIDParams) (User, error) {
+	row := q.db.QueryRow(ctx, getUserByID, arg.ID, arg.TenantID)
+	var i User
+	err := row.Scan(
+		&i.ID,
+		&i.TenantID,
+		&i.ExternalID,
+		&i.Name,
+		&i.AvatarUrl,
+		&i.Metadata,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.DeletedAt,
+	)
+	return i, err
+}
+
 const getUserIDByExternalID = `-- name: GetUserIDByExternalID :one
 SELECT id FROM users
 WHERE tenant_id = $1 AND external_id = $2 AND deleted_at IS NULL
@@ -87,6 +113,45 @@ func (q *Queries) GetUserIDByExternalID(ctx context.Context, arg GetUserIDByExte
 	var id uuid.UUID
 	err := row.Scan(&id)
 	return id, err
+}
+
+const getUsersByExternalIDs = `-- name: GetUsersByExternalIDs :many
+SELECT id, tenant_id, external_id, name, avatar_url, metadata, created_at, updated_at, deleted_at FROM users WHERE tenant_id = $1 AND external_id = ANY($2::text[]) AND deleted_at IS NULL
+`
+
+type GetUsersByExternalIDsParams struct {
+	TenantID uuid.UUID
+	Column2  []string
+}
+
+func (q *Queries) GetUsersByExternalIDs(ctx context.Context, arg GetUsersByExternalIDsParams) ([]User, error) {
+	rows, err := q.db.Query(ctx, getUsersByExternalIDs, arg.TenantID, arg.Column2)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []User{}
+	for rows.Next() {
+		var i User
+		if err := rows.Scan(
+			&i.ID,
+			&i.TenantID,
+			&i.ExternalID,
+			&i.Name,
+			&i.AvatarUrl,
+			&i.Metadata,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+			&i.DeletedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const leaveAllChannels = `-- name: LeaveAllChannels :exec

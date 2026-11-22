@@ -85,6 +85,30 @@ type Message struct {
 	CreatedAt      time.Time
 }
 
+type MessageDetail struct {
+	ChannelID        uuid.UUID
+	Seq              int64
+	ID               uuid.UUID
+	TenantID         uuid.UUID
+	SenderID         uuid.NullUUID
+	ClientMsgID      *string
+	Type             string
+	Text             *string
+	Attachments      string
+	ReplyToID        uuid.NullUUID
+	ReactionCounts   string
+	Metadata         string
+	RevSeq           int64
+	EditedAt         *time.Time
+	DeletedAt        *time.Time
+	CreatedAt        time.Time
+	SenderExternalID *string
+	SenderName       *string
+	SenderAvatarUrl  *string
+	SenderMetadata   *string
+	SenderDeletedAt  *time.Time
+}
+
 type MessageReaction struct {
 	MessageID uuid.UUID
 	UserID    uuid.UUID

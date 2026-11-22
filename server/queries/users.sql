@@ -30,3 +30,9 @@ DELETE FROM devices WHERE tenant_id = $1 AND user_id = $2;
 -- name: LeaveAllChannels :exec
 UPDATE channel_members SET left_at = now()
 WHERE tenant_id = $1 AND user_id = $2 AND left_at IS NULL;
+
+-- name: GetUsersByExternalIDs :many
+SELECT * FROM users WHERE tenant_id = $1 AND external_id = ANY($2::text[]) AND deleted_at IS NULL;
+
+-- name: GetUserByID :one
+SELECT * FROM users WHERE id = $1 AND tenant_id = $2;

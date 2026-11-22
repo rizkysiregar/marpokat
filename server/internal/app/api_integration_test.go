@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -39,7 +40,8 @@ func newEnv(t *testing.T) *env {
 		t.Fatal(err)
 	}
 	pool := testdb.Pool(t)
-	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	// errors of the server under test are what explains a 500, so they are shown
+	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 	// a new router per test means a new tenant cache, so disable/rotate are visible at once
 	h := httpx.Chain(PublicRoutes(Deps{Info: Info{Version: "test"}, Pool: pool, Box: box, Log: log}), httpx.WithRequestID())
 	srv := httptest.NewServer(h)
@@ -91,14 +93,17 @@ func (r response) errCode() string {
 	return code
 }
 
-func (e *env) do(method, path, apiKey, token string, body any) response {
-	e.t.Helper()
+// request is do without the *testing.T calls, so goroutines can use it.
+func (e *env) request(method, path, apiKey, token string, body any) (response, error) {
 	var rd io.Reader
 	if body != nil {
 		b, _ := json.Marshal(body)
 		rd = bytes.NewReader(b)
 	}
-	req, _ := http.NewRequestWithContext(context.Background(), method, e.srv.URL+path, rd)
+	req, err := http.NewRequestWithContext(context.Background(), method, e.srv.URL+path, rd)
+	if err != nil {
+		return response{}, err
+	}
 	if apiKey != "" {
 		req.Header.Set(auth.HeaderAPIKey, apiKey)
 	}
@@ -110,7 +115,7 @@ func (e *env) do(method, path, apiKey, token string, body any) response {
 	}
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
-		e.t.Fatal(err)
+		return response{}, err
 	}
 	defer func() { _ = res.Body.Close() }()
 	out := response{status: res.StatusCode, body: map[string]any{}}
@@ -118,7 +123,16 @@ func (e *env) do(method, path, apiKey, token string, body any) response {
 	if len(raw) > 0 {
 		_ = json.Unmarshal(raw, &out.body)
 	}
-	return out
+	return out, nil
+}
+
+func (e *env) do(method, path, apiKey, token string, body any) response {
+	e.t.Helper()
+	r, err := e.request(method, path, apiKey, token, body)
+	if err != nil {
+		e.t.Fatal(err)
+	}
+	return r
 }
 
 func TestUserLifecycle(t *testing.T) {

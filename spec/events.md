@@ -190,6 +190,13 @@ have no relative order.
 Events without `rev_seq` (`read.updated`, `typing`, `presence`, `channel.*`, `member.*`) are state snapshots:
 apply the latest. `channel.*` and `member.*` are also covered by `GET /v1/channels?updated_since=`.
 
+### 6.1 System messages
+
+Changes to a channel are announced as messages without sender (`type: "system"`, `text: null`), so they take part
+in ordering, history and sync like any message. `metadata.event` is one of: `channel.created`, `channel.renamed`,
+`member.added`, `member.left`, `member.removed`. They never count as unread. See the `Message` schema in openapi.yaml
+for their fields.
+
 ## 7. Reconnect
 
 On close (any code except `4003`, `4005`) or a dead heartbeat:

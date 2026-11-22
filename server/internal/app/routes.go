@@ -10,6 +10,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/rizkysiregar/marpokat/server/internal/auth"
+	"github.com/rizkysiregar/marpokat/server/internal/channel"
+	"github.com/rizkysiregar/marpokat/server/internal/message"
 	"github.com/rizkysiregar/marpokat/server/internal/platform/health"
 	"github.com/rizkysiregar/marpokat/server/internal/platform/httpx"
 	"github.com/rizkysiregar/marpokat/server/internal/platform/secretbox"
@@ -39,6 +41,8 @@ func PublicRoutes(d Deps) http.Handler {
 		httpx.WriteJSON(w, http.StatusOK, map[string]string{"name": "marpokat", "version": d.Info.Version})
 	})
 	user.NewHandler(users, d.Log).Register(mux, mw.User, mw.Server)
+	channel.NewHandler(channel.NewService(d.Pool), d.Log).Register(mux, mw.User, mw.Server)
+	message.NewHandler(message.NewService(d.Pool), d.Log).Register(mux, mw.User, mw.Server)
 	mux.HandleFunc("/", httpx.NotFound)
 	return mux
 }

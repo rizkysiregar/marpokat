@@ -13,6 +13,7 @@ const (
 	CodeUnauthenticated  = "unauthenticated"
 	CodeTokenExpired     = "token_expired"
 	CodeForbidden        = "forbidden"
+	CodeChannelFrozen    = "channel_frozen"
 	CodeNotFound         = "not_found"
 	CodeMethodNotAllowed = "method_not_allowed"
 	CodeConflict         = "conflict"
