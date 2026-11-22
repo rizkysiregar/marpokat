@@ -1,5 +1,7 @@
 package com.rizkysiregar.marpokat.android
 
+import android.os.Handler
+import android.os.Looper
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
@@ -17,21 +19,37 @@ import kotlinx.coroutines.launch
  * ```
  */
 public object AppLifecycleConnector {
-    /** Returns a function that stops following the app (sign out). The client is also disconnected then. */
-    public fun attach(client: MarpokatClient, owner: LifecycleOwner = ProcessLifecycleOwner.get()): () -> Unit {
-        val observer = object : DefaultLifecycleObserver {
-            override fun onStart(owner: LifecycleOwner) {
-                owner.lifecycleScope.launch { client.connect() }
-            }
+    /**
+     * Returns a function that stops following the app (sign out). The client is also disconnected then.
+     *
+     * Safe to call from any thread: lifecycle observers can only be added and removed on the main thread, so the
+     * work is posted there (in order, so a stop right after attach still stops it).
+     */
+    public fun attach(client: MarpokatClient, owner: LifecycleOwner? = null): () -> Unit {
+        val main = Handler(Looper.getMainLooper())
+        var observer: DefaultLifecycleObserver? = null
+        var target: LifecycleOwner? = null
+        val install = Runnable {
+            val lifecycleOwner = owner ?: ProcessLifecycleOwner.get()
+            val created = object : DefaultLifecycleObserver {
+                override fun onStart(owner: LifecycleOwner) {
+                    owner.lifecycleScope.launch { client.connect() }
+                }
 
-            override fun onStop(owner: LifecycleOwner) {
-                owner.lifecycleScope.launch { client.disconnect() }
+                override fun onStop(owner: LifecycleOwner) {
+                    owner.lifecycleScope.launch { client.disconnect() }
+                }
             }
+            lifecycleOwner.lifecycle.addObserver(created)
+            observer = created
+            target = lifecycleOwner
         }
-        owner.lifecycle.addObserver(observer)
+        if (Looper.myLooper() == Looper.getMainLooper()) install.run() else main.post(install)
         return {
-            owner.lifecycle.removeObserver(observer)
-            owner.lifecycleScope.launch { client.disconnect() }
+            main.post {
+                observer?.let { target?.lifecycle?.removeObserver(it) }
+                target?.lifecycleScope?.launch { client.disconnect() }
+            }
         }
     }
 }
