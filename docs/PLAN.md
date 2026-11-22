@@ -29,7 +29,7 @@ tidak dihapus. Keputusan baru ditambahkan ke bagian 2 dengan nomor berikutnya, d
 | M3        | Realtime gateway (WebSocket, fan-out, typing, read)        | ✅ Selesai |
 | M4        | Worker, push notification, retry dan DLQ                   | 🟡 Berjalan |
 | M5        | Media dan reaction, edit/hapus pesan                       | 🟡 Kode selesai, belum diuji di dev |
-| M6        | SDK JS + chat di Narrativ web                              | ⚪ Belum |
+| M6        | SDK JS + chat di Narrativ web                              | 🟡 SDK selesai, Narrativ web belum |
 | M7        | SDK Android + chat di Narrativ Android                     | ⚪ Belum |
 | M8        | Hardening dan launch prod                                  | ⚪ Belum |
 
@@ -506,17 +506,17 @@ lewat FCM memakai kredensial tenant. Payload: `channel_id`, `message_id`, nama p
 - [x] NV-06: `GET /v1/server/channels/dm` di Marpokat + freeze/unfreeze di narrativ-backend (PR #83, merge setelah M5 jalan di dev)
 - [x] **Selesai jika:** foto + reaction + edit + hapus + reply + putus koneksi dari klien referensi (`examples/web-chat/test.mjs`, dua klien) tampil sama di keduanya setelah reconnect + sync. Lolos terhadap api + worker + MinIO sungguhan; tinggal uji di dev
 
-### M6: SDK JS + Narrativ web ⚪
+### M6: SDK JS + Narrativ web 🟡
 
-- [ ] Scaffold `sdk-js` (workspace npm, TypeScript strict, Vitest, tsup), tipe di-generate dari `spec/openapi.yaml`
-- [ ] `@marpokat/core`: `MarpokatClient.connect({apiKey, tokenProvider})`, reconnect backoff + jitter, ping, refresh token
-- [ ] State channel dan pesan, antrean pesan pending + retry idempotent, deteksi celah `rev_seq` → sync
-- [ ] Upload attachment (presigned) dengan progress
-- [ ] `@marpokat/react`: `useChannels`, `useChannel`, `useMessages`, `useSendMessage`, `useTyping`, `useUnreadCount`
-- [ ] Cache IndexedDB untuk daftar channel dan pesan terakhir
-- [ ] Publish ke GitHub Packages
+- [x] Scaffold `sdk-js` (workspace npm, TypeScript strict, Vitest, tsup), tipe di-generate dari `spec/openapi.yaml`
+- [x] `@marpokat/core`: `MarpokatClient` (`tokenProvider`), reconnect backoff + jitter, ping, refresh token
+- [x] State channel dan pesan, antrean pending + retry idempotent (`send/retry/discard`), deteksi celah `rev_seq` → sync
+- [x] Upload attachment (presigned) dengan progress
+- [x] `@marpokat/react`: `useChannels`, `useChannel`, `useMessages`, `useSendMessage`, `useMessageActions`, `useTyping`, `useUnreadCount`
+- [x] Cache IndexedDB untuk daftar channel dan 50 pesan terakhir per channel
+- [ ] Publish ke GitHub Packages (perlu token `write:packages` dari pemilik repo)
 - [ ] NV-08
-- [ ] **Selesai jika:** chat dipakai internal di Narrativ web dev
+- [ ] **Selesai jika:** chat dipakai internal di Narrativ web dev. Sudah terbukti: core terhadap server sungguhan (`sdk-js/packages/core/e2e/live.mjs`, dua klien, termasuk putus koneksi); 22 + 4 tes unit
 
 ### M7: SDK Android + Narrativ Android ⚪
 

@@ -1,0 +1,20 @@
+{
+  "name": "@marpokat/core",
+  "version": "0.1.0",
+  "description": "Marpokat chat client for the browser and Node: connection, state, sync, uploads",
+  "type": "module",
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js", "require": "./dist/index.cjs" } },
+  "files": ["dist"],
+  "scripts": {
+    "gen": "openapi-typescript ../../../spec/openapi.yaml -o src/generated/api.ts",
+    "build": "tsup src/index.ts --format esm,cjs --dts --clean",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "publishConfig": { "registry": "https://npm.pkg.github.com" },
+  "repository": { "type": "git", "url": "git+https://github.com/rizkysiregar/marpokat.git", "directory": "sdk-js/packages/core" },
+  "license": "UNLICENSED"
+}
