@@ -30,7 +30,7 @@ tidak dihapus. Keputusan baru ditambahkan ke bagian 2 dengan nomor berikutnya, d
 | M4        | Worker, push notification, retry dan DLQ                   | 🟡 Berjalan |
 | M5        | Media dan reaction, edit/hapus pesan                       | 🟡 Kode selesai, belum diuji di dev |
 | M6        | SDK JS + chat di Narrativ web                              | ✅ Selesai (diuji di dev) |
-| M7        | SDK Android + chat di Narrativ Android                     | ⚪ Belum |
+| M7        | SDK Android + chat di Narrativ Android                     | 🟡 SDK selesai, Narrativ Android belum |
 | M8        | Hardening dan launch prod                                  | ⚪ Belum |
 
 Legenda: ⚪ belum, 🟡 berjalan, ✅ selesai, ⛔ terblokir
@@ -518,16 +518,16 @@ lewat FCM memakai kredensial tenant. Payload: `channel_id`, `message_id`, nama p
 - [x] NV-08: narrativ-web-client PR #16
 - [x] **Selesai jika:** chat dipakai internal di Narrativ web dev. Sudah terbukti: core terhadap server sungguhan (`sdk-js/packages/core/e2e/live.mjs`, dua klien, termasuk putus koneksi); 22 + 4 tes unit
 
-### M7: SDK Android + Narrativ Android ⚪
+### M7: SDK Android + Narrativ Android 🟡
 
-- [ ] Scaffold `sdk-android` (library module, Kotlin, kotlinx.serialization, OkHttp, Room)
-- [ ] Koneksi WS + reconnect + ping, sadar lifecycle app (disconnect di background, reconnect di foreground)
-- [ ] Repository channel/pesan dengan Room sebagai sumber UI (offline-first), antrean kirim, sync
-- [ ] Upload attachment, reaction, read, typing
-- [ ] Registrasi push token dan helper parsing payload push
-- [ ] Publish ke GitHub Packages (Maven)
+- [x] Scaffold `sdk-android` (modul `core` Kotlin/JVM murni + modul `android`; kotlinx.serialization, OkHttp, Room)
+- [x] Koneksi WS + reconnect + ping; `AppLifecycleConnector` (disconnect di background, reconnect di foreground)
+- [x] State sebagai `StateFlow<ChatState>`, cache Room (channel + 50 pesan terakhir), antrean kirim idempoten, sync
+- [x] Upload attachment dengan progress, reaction, edit, hapus, read, typing
+- [x] Registrasi push token dan `MarpokatPush.parse` untuk payload FCM
+- [ ] Publish ke GitHub Packages (Maven), perlu PAT `write:packages` dari pemilik repo
 - [ ] NV-09
-- [ ] **Selesai jika:** chat lintas web ↔ Android di Narrativ dev, push membuka ruang chat yang benar
+- [ ] **Selesai jika:** chat lintas web ↔ Android di Narrativ dev, push membuka ruang chat yang benar. Sudah terbukti: core terhadap server sungguhan (`LiveServerTest`, dua klien); 22 tes klien + 6 tes OkHttp/MockWebServer + 5 tes push. Cache Room belum punya tes instrumented
 
 ### M8: Hardening dan launch prod ⚪
 

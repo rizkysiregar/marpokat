@@ -13,7 +13,7 @@ Plan, decisions and progress: [`docs/PLAN.md`](docs/PLAN.md).
 | `spec/`         | The contract: `openapi.yaml` (REST) and `events.md` (WebSocket)           |
 | `examples/`     | `web-chat`: a one-file client to try the chat by hand                    |
 | `sdk-js/`       | `@rizkysiregar/marpokat-core` and `@rizkysiregar/marpokat-react` (from M6)                          |
-| `sdk-android/`  | Kotlin SDK (from M7)                                                      |
+| `sdk-android/`  | Kotlin SDK: `marpokat-core` and `marpokat-android`                        |
 | `docs/`         | Plan and integration docs                                                |
 
 ## Server quick start
