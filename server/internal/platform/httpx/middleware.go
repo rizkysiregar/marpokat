@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"runtime/debug"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -42,6 +43,20 @@ func Chain(h http.Handler, mws ...Middleware) http.Handler {
 		h = mws[i](h)
 	}
 	return h
+}
+
+// WithCleanInput answers 400 to a request whose path or query holds a NUL character (%00): Postgres rejects such text,
+// which would otherwise come back as a 500 from whichever query the value reaches first.
+func WithCleanInput() Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if strings.ContainsRune(r.URL.Path, 0) || strings.Contains(r.URL.RawQuery, "%00") || strings.ContainsRune(r.URL.RawQuery, 0) {
+				WriteError(w, r, http.StatusBadRequest, CodeBadRequest, "the address must not contain the NUL character")
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
 }
 
 // WithRequestID attaches a request id: the client's X-Request-Id when it looks sane, a new UUIDv7 otherwise.

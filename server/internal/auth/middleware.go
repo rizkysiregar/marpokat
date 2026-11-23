@@ -53,11 +53,43 @@ type TenantResolver interface {
 // UserLookup maps an external id to the internal user id inside a tenant, or returns ErrUnknownUser.
 type UserLookup func(ctx context.Context, tenantID uuid.UUID, externalID string) (uuid.UUID, error)
 
+// RequestLimiter is ratelimit.Limiter: a token bucket named by its key parts.
+type RequestLimiter interface {
+	Allow(ctx context.Context, capacity int, perSecond float64, keyParts ...string) (bool, time.Duration)
+}
+
+// What one caller may do over REST, on top of the stricter limits of sending messages and creating uploads. A user
+// is one bucket across all their devices; a tenant backend (server token) is one bucket per tenant. Generous: it
+// stops a runaway client or a loop, not normal use.
+const (
+	userRequestBurst        = 60
+	userRequestsPerSecond   = 20
+	serverRequestBurst      = 200
+	serverRequestsPerSecond = 100
+)
+
 type Middleware struct {
 	tenants TenantResolver
 	users   UserLookup
 	log     *slog.Logger
 	now     func() time.Time
+	limiter RequestLimiter
+}
+
+// SetRequestLimiter turns on the limit on every authenticated REST request. Without it nothing is limited here.
+func (m *Middleware) SetRequestLimiter(l RequestLimiter) { m.limiter = l }
+
+// within takes a token for this caller and answers 429 itself when there is none.
+func (m *Middleware) within(w http.ResponseWriter, r *http.Request, burst int, perSecond float64, parts ...string) bool {
+	if m.limiter == nil {
+		return true
+	}
+	ok, wait := m.limiter.Allow(r.Context(), burst, perSecond, append([]string{"req"}, parts...)...)
+	if ok {
+		return true
+	}
+	httpx.WriteErr(w, r, m.log, httpx.ErrRateLimited(wait, "too many requests, slow down"))
+	return false
 }
 
 func NewMiddleware(tenants TenantResolver, users UserLookup, log *slog.Logger) *Middleware {
@@ -86,6 +118,9 @@ func (m *Middleware) User(next http.Handler) http.Handler {
 			m.unavailable(w, r, err)
 			return
 		}
+		if !m.within(w, r, userRequestBurst, userRequestsPerSecond, t.ID.String(), userID.String()) {
+			return
+		}
 		ctx := WithPrincipal(r.Context(), Principal{Tenant: t, UserID: userID, ExternalID: ext})
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
@@ -100,6 +135,9 @@ func (m *Middleware) Server(next http.Handler) http.Handler {
 		}
 		if err := VerifyServerToken(token, secret, m.now()); err != nil {
 			m.reject(w, r, err)
+			return
+		}
+		if !m.within(w, r, serverRequestBurst, serverRequestsPerSecond, t.ID.String(), "server") {
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(WithPrincipal(r.Context(), Principal{Tenant: t})))

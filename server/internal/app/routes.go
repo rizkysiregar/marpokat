@@ -68,6 +68,7 @@ func PublicRoutes(d Deps) http.Handler {
 	user.NewHandler(users, d.Log).Register(mux, mw.User, mw.Server)
 	if d.Redis != nil {
 		messages.SetLimiter(ratelimit.New(d.Redis, d.Log))
+		mw.SetRequestLimiter(ratelimit.New(d.Redis, d.Log))
 	}
 	if d.Redis != nil && d.Hub != nil {
 		opts := d.Realtime

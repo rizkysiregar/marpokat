@@ -122,3 +122,57 @@ func TestBearer(t *testing.T) {
 		}
 	}
 }
+
+type scriptedLimiter struct {
+	allow bool
+	keys  [][]string
+}
+
+func (s *scriptedLimiter) Allow(_ context.Context, capacity int, _ float64, parts ...string) (bool, time.Duration) {
+	s.keys = append(s.keys, parts)
+	return s.allow, 1500 * time.Millisecond
+}
+
+func TestRequestLimitAnswers429WithRetryAfterAndNeverReachesTheHandler(t *testing.T) {
+	m := newMW()
+	lim := &scriptedLimiter{allow: false}
+	m.SetRequestLimiter(lim)
+	reached := false
+	h := m.User(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true }))
+	valid, _ := SignUserToken(secret, "u_1", time.Hour, now)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set(HeaderAPIKey, "mpk_a")
+	req.Header.Set("Authorization", "Bearer "+valid)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") != "2" || reached {
+		t.Fatalf("status %d, Retry-After %q, handler reached %v", rec.Code, rec.Header().Get("Retry-After"), reached)
+	}
+	// one bucket per user of a tenant: other tenants and other users never share it
+	if len(lim.keys) != 1 || lim.keys[0][0] != "req" || lim.keys[0][1] != tenantA.ID.String() || lim.keys[0][2] != userID.String() {
+		t.Fatalf("bucket key = %v", lim.keys)
+	}
+}
+
+func TestRequestLimitLetsRequestsThroughAndServerCallsShareOneBucketPerTenant(t *testing.T) {
+	m := newMW()
+	lim := &scriptedLimiter{allow: true}
+	m.SetRequestLimiter(lim)
+	server, _ := SignServerToken(secret, time.Minute, now)
+	if status, _ := call(m.Server(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})), "mpk_a", server); status != 200 {
+		t.Fatalf("status %d", status)
+	}
+	if len(lim.keys) != 1 || lim.keys[0][2] != "server" {
+		t.Fatalf("bucket key = %v", lim.keys)
+	}
+}
+
+func TestWithoutALimiterNothingIsLimited(t *testing.T) {
+	m := newMW()
+	valid, _ := SignUserToken(secret, "u_1", time.Hour, now)
+	if status, _ := call(m.User(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})), "mpk_a", valid); status != 200 {
+		t.Fatalf("status %d", status)
+	}
+}

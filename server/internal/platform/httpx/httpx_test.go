@@ -139,3 +139,51 @@ func TestWriteErrSetsRetryAfter(t *testing.T) {
 		t.Fatalf("body: %+v", body)
 	}
 }
+
+func TestContainsNUL(t *testing.T) {
+	yes := []string{"{\"a\":\"x\\u0000y\"}", "{\"a\":\"x\\U0000\"}"[:0] + "{\"a\":\"\\u0000\"}", "{\"a\":\"x\x00y\"}", "{\"a\":\"\\\\\\u0000\"}"}
+	no := []string{"{}", "{\"a\":\"hello\"}", "{\"a\":\"back\\\\u0000slash\"}", "{\"a\":\"\\u00e9\"}", "\\u00"}
+	for _, s := range yes {
+		if !ContainsNUL([]byte(s)) {
+			t.Errorf("%q: NUL not found", s)
+		}
+	}
+	for _, s := range no {
+		if ContainsNUL([]byte(s)) {
+			t.Errorf("%q: found a NUL that is not there", s)
+		}
+	}
+}
+
+func TestDecodeJSONRefusesNUL(t *testing.T) {
+	var dst struct{ Text string }
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader("{\"text\":\"a\\u0000b\"}"))
+	if DecodeJSON(rec, req, &dst) || rec.Code != http.StatusBadRequest {
+		t.Fatalf("NUL accepted: %d", rec.Code)
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/", strings.NewReader("{\"text\":\"fine\"}"))
+	if !DecodeJSON(rec, req, &dst) || dst.Text != "fine" {
+		t.Fatalf("a clean body was refused: %d", rec.Code)
+	}
+}
+
+func TestCleanInputRefusesNULInPathAndQuery(t *testing.T) {
+	reached := 0
+	h := WithCleanInput()(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached++ }))
+	for target, want := range map[string]int{"/v1/devices/ok": 200, "/v1/devices/a%00b": 400, "/v1/channels?cursor=%00": 400, "/v1/channels?cursor=abc": 200} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
+		got := rec.Code
+		if got == 0 {
+			got = 200
+		}
+		if got != want {
+			t.Errorf("%s: %d, want %d", target, got, want)
+		}
+	}
+	if reached != 2 {
+		t.Errorf("handler reached %d times, want 2", reached)
+	}
+}

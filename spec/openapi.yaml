@@ -43,6 +43,11 @@ info:
     | Group members | 256 |
     | Reactions per user per message | 10 distinct emoji |
     | `client_msg_id` | 64 characters |
+    | REST requests | 60 burst, 20 per second per user (all devices together); 200 burst, 100 per second per tenant backend |
+    | JSON body | 64 KB |
+
+    Text anywhere in a request (JSON, path, query, WebSocket frames) must not contain the NUL character: it is
+    answered with `400 bad_request`.
 servers:
   - url: https://api-dev-marpokat.rizkysiregar.my.id
     description: dev

@@ -268,6 +268,10 @@ func (s *Session) readLoop() {
 			s.fail("", httpx.NewError(400, httpx.CodeBadRequest, "binary frames are not supported"))
 			continue
 		}
+		if httpx.ContainsNUL(data) {
+			s.fail("", httpx.NewError(400, httpx.CodeBadRequest, "text must not contain the NUL character"))
+			continue
+		}
 		var f inFrame
 		if json.Unmarshal(data, &f) != nil || f.Type == "" {
 			s.fail("", httpx.NewError(400, httpx.CodeBadRequest, "a frame is a JSON object with a type"))

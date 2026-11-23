@@ -529,7 +529,18 @@ lewat FCM memakai kredensial tenant. Payload: `channel_id`, `message_id`, nama p
 - [x] NV-09: narrativ-android PR #59 (diuji di perangkat: chat jalan)
 - [ ] **Selesai jika:** chat lintas web ↔ Android di Narrativ dev, push membuka ruang chat yang benar. Sudah terbukti: core terhadap server sungguhan (`LiveServerTest`, dua klien); 22 tes klien + 6 tes OkHttp/MockWebServer + 5 tes push. Cache Room belum punya tes instrumented
 
-### M8: Hardening dan launch prod ⚪
+### M8: Hardening dan launch prod 🟡
+
+Hardening di dev (2026-11-23), sebelum prod:
+
+- [x] Probe 1980 request rusak (NUL, unicode aneh, JSON bersarang 30 ribu level, id panjang, kredensial salah) ke setiap route di spec: satu bug, byte NUL di parameter jalur menjadi 500 → dijaga di tengah (400) untuk path, query, body JSON dan frame WebSocket
+- [x] Rate limit REST umum per pemanggil (user: 60 burst, 20/detik; backend tenant: 200 burst, 100/detik), di luar batas kirim pesan dan upload yang sudah ada
+- [x] Audit: query berkunci tenant (sisanya berkunci UUID yang sudah dimuat lewat query bertenant), batas body 64 KB dan frame WS, JWT dikunci HS256, tidak ada secret di log
+- [ ] Batas koneksi WebSocket per user (belum ada: satu user bisa membuka ratusan)
+- [ ] Redis dev dan prod tanpa password, port terbuka di LAN VM (`requirepass`/ACL)
+- [ ] Throttle percobaan API key salah per IP (sekarang hanya Cloudflare)
+- [ ] URL presigned PUT masih bisa menimpa objek sampai kedaluwarsa (15 menit) setelah `complete`: worker perlu memeriksa ulang ukuran
+
 
 - [ ] Webhook ke tenant (event pesan, signature HMAC, retry + DLQ)
 - [ ] Load test k6: 1000 koneksi WS serentak + 50 pesan/detik, catat p95 latensi kirim → terima

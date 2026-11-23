@@ -1,6 +1,7 @@
 package httpx
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -42,13 +43,24 @@ func (f FieldErrors) OrNil() error {
 // Unknown fields are ignored so that newer clients keep working against an older server.
 func DecodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 	r.Body = http.MaxBytesReader(w, r.Body, DefaultMaxBody)
-	dec := json.NewDecoder(r.Body)
-	if err := dec.Decode(dst); err != nil {
+	raw, err := io.ReadAll(r.Body)
+	if err != nil {
 		var maxErr *http.MaxBytesError
-		switch {
-		case errors.As(err, &maxErr):
+		if errors.As(err, &maxErr) {
 			WriteError(w, r, http.StatusRequestEntityTooLarge, CodePayloadTooLarge,
 				fmt.Sprintf("request body is larger than %d bytes", maxErr.Limit))
+		} else {
+			WriteError(w, r, http.StatusBadRequest, CodeBadRequest, "request body could not be read")
+		}
+		return false
+	}
+	if ContainsNUL(raw) { // Postgres cannot store it: left alone it would surface as a 500
+		WriteError(w, r, http.StatusBadRequest, CodeBadRequest, "text must not contain the NUL character")
+		return false
+	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	if err := dec.Decode(dst); err != nil {
+		switch {
 		case errors.Is(err, io.EOF):
 			WriteError(w, r, http.StatusBadRequest, CodeBadRequest, "request body is empty")
 		default:
@@ -67,6 +79,23 @@ func DecodeJSON(w http.ResponseWriter, r *http.Request, dst any) bool {
 		return false
 	}
 	return true
+}
+
+// ContainsNUL reports whether a JSON document holds the NUL character, raw or as the escape \u0000. The scan skips
+// escaped characters, so a backslash written as \\ followed by the text u0000 is not mistaken for it.
+func ContainsNUL(raw []byte) bool {
+	for i := 0; i < len(raw); i++ {
+		switch raw[i] {
+		case 0:
+			return true
+		case '\\':
+			if i+5 < len(raw) && raw[i+1] == 'u' && bytes.EqualFold(raw[i+2:i+6], []byte("0000")) {
+				return true
+			}
+			i++ // the character after a backslash is part of the escape
+		}
+	}
+	return false
 }
 
 // WriteValidation writes 400 validation_failed with the field errors.

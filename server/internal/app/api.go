@@ -75,6 +75,7 @@ func RunAPI(ctx context.Context, info Info) error {
 		httpx.WithRequestID(),
 		httpx.WithObservability(log, m),
 		httpx.WithRecover(log),
+		httpx.WithCleanInput(),
 	))
 	// http.Server.Shutdown does not touch hijacked connections: the WebSockets are closed here, with 1012, once the
 	// pod no longer receives traffic (readiness failed during the drain delay), so clients reconnect elsewhere
