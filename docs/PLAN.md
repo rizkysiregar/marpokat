@@ -544,9 +544,10 @@ Satu aplikasi Laravel (frontend saja) untuk landing page, pendaftaran, manajemen
 - [x] Go: migrasi 00004 (accounts, account_tokens, console_sessions, console_audit, tenants.account_id), paket `internal/console`, listener terpisah, CLI `account promote`, bersih-bersih sesi kedaluwarsa
 - [x] Tes: unit (password, e-mail, slug, MIME, SMTP palsu, konfigurasi) dan integrasi terhadap Postgres + Redis nyata (alur daftar → verifikasi → proyek → rotasi, batas, isolasi antar akun, admin)
 - [x] Gitops dev: port dan Service `marpokat-console` (mati sampai `CONSOLE_ADDR` diisi)
-- [ ] Pilih SMTP untuk e-mail nyata (Narrativ memakai SMTP juga) dan isi `MAIL_*`
-- [ ] Repo `marpokat-web` (Laravel 12): halaman publik, daftar/masuk/lupa password, dasbor proyek, kunci, push, audit, admin
-- [ ] Pipeline Jenkins + Argo untuk `marpokat-web`, Cloudflare Tunnel untuk domain websitenya
+- [x] SMTP: akun yang sama dengan Narrativ (`monostacklabs.studio@gmail.com`); password aplikasinya disimpan di secret, bukan di repo
+- [x] Repo terpisah `marpokat-web` (Laravel 12, Blade, Tailwind 4, FrankenPHP; tanpa database): landing, docs, daftar/masuk/lupa password, konfirmasi e-mail, proyek (secret tampil sekali, push, pengaturan, matikan), akun (sesi, audit), admin; 36 tes; CSP ketat; image read-only tanpa capabilities; diuji ujung ke ujung terhadap Console API sungguhan
+- [x] Jenkinsfile + manifest `homelabs-gitops/apps/marpokat-web-dev` (host dev `app-dev-marpokat.rizkysiregar.my.id`; prod `marpokat.rizkysiregar.my.id` menyusul)
+- [ ] Menyalakan di dev: secret (`CONSOLE_SERVICE_KEY`, `MAIL_*`, `marpokat-web-secrets`), configmap `CONSOLE_ADDR`, pipeline Jenkins, Argo app, Cloudflare Tunnel (langkah di README gitops)
 - [ ] **Selesai jika:** orang bisa mendaftar di website, membuat proyek, mendapat API key dan secret, dan memakainya di aplikasi
 
 ### M8: Hardening dan launch prod 🟡
