@@ -31,6 +31,7 @@ tidak dihapus. Keputusan baru ditambahkan ke bagian 2 dengan nomor berikutnya, d
 | M5        | Media dan reaction, edit/hapus pesan                       | 🟡 Kode selesai, belum diuji di dev |
 | M6        | SDK JS + chat di Narrativ web                              | ✅ Selesai (diuji di dev) |
 | M7        | SDK Android + chat di Narrativ Android                     | 🟡 SDK selesai, Narrativ Android belum |
+| M9        | Website: landing, daftar akun, manajemen proyek (Laravel)  | 🟡 Console API di Go selesai, Laravel belum |
 | M8        | Hardening dan launch prod                                  | ⚪ Belum |
 
 Legenda: ⚪ belum, 🟡 berjalan, ✅ selesai, ⛔ terblokir
@@ -102,6 +103,12 @@ Legenda: ⚪ belum, 🟡 berjalan, ✅ selesai, ⛔ terblokir
 | D59 | **Reaction**: emoji string 1-64 byte tanpa spasi/kontrol, maks 10 berbeda per user per pesan, idempoten (tidak mengubah `rev_seq`); `mine` dihitung per penerima di event dan respons | Aplikasi boleh punya emoji sendiri tanpa daftar tetap |
 | D60 | **Reply**: cuplikan 200 karakter diambil saat dibaca (ikut edit/hapus pesan asal); membalas pesan yang baru dihapus diperbolehkan | Cuplikan tidak basi |
 | D61 | **`GET /v1/server/channels/dm`** mencari DM tanpa membuatnya | Membekukan DM saat blokir tidak boleh memulai percakapan |
+| D62 | **Website = Laravel sebagai frontend saja, tanpa database sendiri.** Akun, sesi, proyek, kunci, dan audit disimpan di Postgres Marpokat dan diakses lewat **Console API** (`spec/console.yaml`) di Go | Satu pemilik data dan enkripsi; Laravel bisa diganti tanpa migrasi data |
+| D63 | **Console API di listener sendiri** (`CONSOLE_ADDR`, Service `marpokat-console`), tanpa Ingress dan tanpa Cloudflare; dijaga `X-Console-Key` (≥32 karakter) + token sesi opaque (SHA-256 disimpan, idle 12 jam, maks 30 hari) | Endpoint akun tidak pernah terbuka ke internet; alamat pengunjung diteruskan lewat `X-Client-IP` |
+| D64 | **Akun**: e-mail unik tanpa peduli huruf, argon2id (19 MiB, maks 3 hash bersamaan agar muat di pod 256 MiB), verifikasi e-mail wajib sebelum membuat proyek, `register` dan `forgot-password` menjawab sama untuk e-mail dikenal atau tidak, login dibatasi per e-mail dan per alamat, e-mail tidak dikenal dihitung selama hash yang salah | Tidak bisa dipakai untuk mengintip siapa punya akun |
+| D65 | **Secret hanya tampil sekali** (dibuat atau dirotasi); rotasi, kredensial push, dan menonaktifkan proyek meminta password lagi (10 percobaan beruntun, lalu 1 per menit); proyek milik akun lain dijawab 404 | Sesi curian tidak cukup untuk mengambil alih kunci |
+| D66 | **Platform admin** hanya lewat CLI (`marpokat account promote`), tidak ada API-nya; aksi admin tercatat di audit | Admin tidak bisa dibuat lewat celah API |
+| D67 | **E-mail dikirim oleh Go** lewat SMTP (`MAIL_DRIVER=smtp`) atau dicetak ke log (`log`, hanya pengembangan), di latar belakang agar pendaftaran tidak menunggu server surat | Laravel tidak perlu tahu token verifikasi |
 
 ---
 
@@ -528,6 +535,19 @@ lewat FCM memakai kredensial tenant. Payload: `channel_id`, `message_id`, nama p
 - [x] Publish ke GitHub Packages (Maven), `marpokat-core` dan `marpokat-android` 0.1.0
 - [x] NV-09: narrativ-android PR #59 (diuji di perangkat: chat jalan)
 - [ ] **Selesai jika:** chat lintas web ↔ Android di Narrativ dev, push membuka ruang chat yang benar. Sudah terbukti: core terhadap server sungguhan (`LiveServerTest`, dua klien); 22 tes klien + 6 tes OkHttp/MockWebServer + 5 tes push. Cache Room belum punya tes instrumented
+
+### M9: Website 🟡
+
+Satu aplikasi Laravel (frontend saja) untuk landing page, pendaftaran, manajemen proyek, dan admin platform. Semua data lewat Console API.
+
+- [x] Kontrak `spec/console.yaml` (auth, akun, proyek, push, audit, admin)
+- [x] Go: migrasi 00004 (accounts, account_tokens, console_sessions, console_audit, tenants.account_id), paket `internal/console`, listener terpisah, CLI `account promote`, bersih-bersih sesi kedaluwarsa
+- [x] Tes: unit (password, e-mail, slug, MIME, SMTP palsu, konfigurasi) dan integrasi terhadap Postgres + Redis nyata (alur daftar → verifikasi → proyek → rotasi, batas, isolasi antar akun, admin)
+- [x] Gitops dev: port dan Service `marpokat-console` (mati sampai `CONSOLE_ADDR` diisi)
+- [ ] Pilih SMTP untuk e-mail nyata (Narrativ memakai SMTP juga) dan isi `MAIL_*`
+- [ ] Repo `marpokat-web` (Laravel 12): halaman publik, daftar/masuk/lupa password, dasbor proyek, kunci, push, audit, admin
+- [ ] Pipeline Jenkins + Argo untuk `marpokat-web`, Cloudflare Tunnel untuk domain websitenya
+- [ ] **Selesai jika:** orang bisa mendaftar di website, membuat proyek, mendapat API key dan secret, dan memakainya di aplikasi
 
 ### M8: Hardening dan launch prod 🟡
 

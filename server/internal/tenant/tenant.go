@@ -71,6 +71,11 @@ func secretContext(id uuid.UUID, field string) string { return "tenant/" + id.St
 
 // Create registers a tenant and returns it with its api secret. The secret is never shown again.
 func (s *Service) Create(ctx context.Context, slug, name string, cfg Config) (Tenant, string, error) {
+	return s.CreateOwned(ctx, slug, name, cfg, uuid.NullUUID{})
+}
+
+// CreateOwned is Create for a tenant that belongs to an account of the website.
+func (s *Service) CreateOwned(ctx context.Context, slug, name string, cfg Config, owner uuid.NullUUID) (Tenant, string, error) {
 	if !slugPattern.MatchString(slug) {
 		return Tenant{}, "", ErrInvalidSlug
 	}
@@ -92,6 +97,7 @@ func (s *Service) Create(ctx context.Context, slug, name string, cfg Config) (Te
 		ApiKey:       apiKey,
 		ApiSecretEnc: s.box.Seal([]byte(secret), secretContext(id, "api_secret")),
 		Config:       string(cfgJSON),
+		AccountID:    owner,
 	})
 	if err != nil {
 		var pgErr *pgconn.PgError
@@ -174,6 +180,29 @@ func (s *Service) RotateSecret(ctx context.Context, slug string) (string, error)
 		return "", fmt.Errorf("tenant: rotate secret: %w", err)
 	}
 	return secret, nil
+}
+
+func (s *Service) SetName(ctx context.Context, slug, name string) error {
+	t, err := s.GetBySlug(ctx, slug)
+	if err != nil {
+		return err
+	}
+	if _, err := s.q.UpdateTenantName(ctx, store.UpdateTenantNameParams{ID: t.ID, Name: name}); err != nil {
+		return fmt.Errorf("tenant: set name: %w", err)
+	}
+	return nil
+}
+
+// ClearFCMCredentials removes the push credentials: the tenant stops sending push notifications.
+func (s *Service) ClearFCMCredentials(ctx context.Context, slug string) error {
+	t, err := s.GetBySlug(ctx, slug)
+	if err != nil {
+		return err
+	}
+	if _, err := s.q.UpdateTenantFCMCredentials(ctx, store.UpdateTenantFCMCredentialsParams{ID: t.ID}); err != nil {
+		return fmt.Errorf("tenant: clear FCM credentials: %w", err)
+	}
+	return nil
 }
 
 func (s *Service) SetConfig(ctx context.Context, slug string, cfg Config) error {

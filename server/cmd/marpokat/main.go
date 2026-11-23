@@ -31,6 +31,7 @@ commands:
   migrate [up|down|status]
                       apply database migrations (default: up)
   tenant <command>    manage tenants, see: marpokat tenant help
+  account <command>   manage website accounts, see: marpokat account help
   version             print the version
 `
 
@@ -58,6 +59,8 @@ func main() {
 		err = app.RunMigrate(ctx, info, action)
 	case "tenant":
 		err = app.RunTenant(ctx, os.Args[2:], os.Stdin, os.Stdout)
+	case "account":
+		err = app.RunAccount(ctx, os.Args[2:], os.Stdout)
 	case "version":
 		fmt.Printf("marpokat %s (%s)\n", version, commit)
 	case "help", "-h", "--help":

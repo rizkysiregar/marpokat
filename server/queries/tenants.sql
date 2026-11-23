@@ -1,8 +1,8 @@
 -- The tenants table is the only one queried without tenant_id (PLAN D1).
 
 -- name: CreateTenant :one
-INSERT INTO tenants (id, slug, name, api_key, api_secret_enc, config)
-VALUES ($1, $2, $3, $4, $5, $6)
+INSERT INTO tenants (id, slug, name, api_key, api_secret_enc, config, account_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7)
 RETURNING *;
 
 -- name: GetTenantByAPIKey :one
@@ -16,6 +16,9 @@ SELECT * FROM tenants ORDER BY created_at;
 
 -- name: UpdateTenantSecret :execrows
 UPDATE tenants SET api_secret_enc = $2 WHERE id = $1;
+
+-- name: UpdateTenantName :execrows
+UPDATE tenants SET name = $2 WHERE id = $1;
 
 -- name: UpdateTenantConfig :execrows
 UPDATE tenants SET config = $2 WHERE id = $1;

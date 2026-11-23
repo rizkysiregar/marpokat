@@ -77,3 +77,27 @@ func TestLoadRequiresVariables(t *testing.T) {
 		t.Fatalf("defaults not applied: %+v", p)
 	}
 }
+
+func TestConsoleValidate(t *testing.T) {
+	good := Console{Addr: ":8081", ServiceKey: strings.Repeat("k", 32), BaseURL: "https://marpokat.example.com", MailDriver: "log"}
+	if err := good.Validate(); err != nil {
+		t.Fatalf("a good config was refused: %v", err)
+	}
+	if err := (Console{}).Validate(); err != nil {
+		t.Fatalf("a disabled console must not need anything: %v", err)
+	}
+	for name, mutate := range map[string]func(*Console){
+		"short key":         func(c *Console) { c.ServiceKey = "short" },
+		"no base url":       func(c *Console) { c.BaseURL = "" },
+		"bad base url":      func(c *Console) { c.BaseURL = "marpokat.example.com" },
+		"unknown driver":    func(c *Console) { c.MailDriver = "pigeon" },
+		"smtp without host": func(c *Console) { c.MailDriver = "smtp"; c.MailFrom = "a@b.co" },
+		"smtp without from": func(c *Console) { c.MailDriver = "smtp"; c.MailHost = "smtp.example.com" },
+	} {
+		c := good
+		mutate(&c)
+		if err := c.Validate(); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}

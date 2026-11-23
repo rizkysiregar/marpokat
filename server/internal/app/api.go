@@ -24,12 +24,16 @@ type apiConfig struct {
 	Redis    config.Redis
 	MinIO    config.MinIO
 	Secrets  config.Secrets
+	Console  config.Console
 }
 
 // RunAPI serves the public REST + WebSocket API until ctx is cancelled.
 func RunAPI(ctx context.Context, info Info) error {
 	cfg, err := config.Load[apiConfig]()
 	if err != nil {
+		return err
+	}
+	if err := cfg.Console.Validate(); err != nil {
 		return err
 	}
 	log := NewLogger(cfg.Server.LogLevel, "api", info)
@@ -86,6 +90,12 @@ func RunAPI(ctx context.Context, info Info) error {
 	stopCtx, cancel := drainThenStop(ctx, reg, cfg.Server.ShutdownDelay, log)
 	defer cancel()
 	g, gctx := errgroup.WithContext(stopCtx)
+	if cfg.Console.Enabled() {
+		consoleServer, sessions := newConsole(cfg.Console, pool, rdb, box, log, m)
+		g.Go(func() error { return httpx.Serve(gctx, consoleServer, cfg.Server.ShutdownTimeout, log) })
+		g.Go(func() error { sessions(gctx); return nil })
+		log.Info("console api enabled", "addr", cfg.Console.Addr)
+	}
 	g.Go(func() error { hub.Run(gctx); return nil })
 	g.Go(func() error { return httpx.Serve(gctx, public, cfg.Server.ShutdownTimeout, log) })
 	g.Go(func() error { return httpx.Serve(gctx, mgmt, cfg.Server.ShutdownTimeout, log) })

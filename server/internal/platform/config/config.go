@@ -110,6 +110,52 @@ func (m MinIO) HostAndTLS() (string, bool, error) {
 	}
 }
 
+// Console is the account side of the website (PLAN M9). It is off unless Addr is set: the Console API lives on its own
+// listener, reachable only from the website inside the cluster, never through the public ingress.
+type Console struct {
+	Addr string `env:"CONSOLE_ADDR"`
+	// ServiceKey is what the website sends in X-Console-Key. At least 32 characters.
+	ServiceKey string `env:"CONSOLE_SERVICE_KEY"`
+	// BaseURL is the public address of the website, for the links in e-mails.
+	BaseURL     string `env:"CONSOLE_BASE_URL"`
+	MaxProjects int    `env:"CONSOLE_MAX_PROJECTS" envDefault:"3"`
+
+	// MailDriver is "log" (prints the e-mail, development) or "smtp".
+	MailDriver   string `env:"MAIL_DRIVER" envDefault:"log"`
+	MailHost     string `env:"MAIL_HOST"`
+	MailPort     int    `env:"MAIL_PORT" envDefault:"587"`
+	MailUsername string `env:"MAIL_USERNAME"`
+	MailPassword string `env:"MAIL_PASSWORD"`
+	MailFrom     string `env:"MAIL_FROM"`
+}
+
+func (c Console) Enabled() bool { return c.Addr != "" }
+
+// Validate checks what a running Console API needs. A weak service key would make the whole account system
+// guessable, so it fails the start rather than running.
+func (c Console) Validate() error {
+	if !c.Enabled() {
+		return nil
+	}
+	if len(c.ServiceKey) < 32 {
+		return fmt.Errorf("CONSOLE_SERVICE_KEY must be at least 32 characters (generate with: openssl rand -base64 32)")
+	}
+	u, err := url.Parse(c.BaseURL)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
+		return fmt.Errorf("CONSOLE_BASE_URL %q is not a URL like https://marpokat.example.com", c.BaseURL)
+	}
+	switch c.MailDriver {
+	case "log":
+	case "smtp":
+		if c.MailHost == "" || c.MailFrom == "" {
+			return fmt.Errorf("MAIL_DRIVER=smtp needs MAIL_HOST and MAIL_FROM")
+		}
+	default:
+		return fmt.Errorf("MAIL_DRIVER must be log or smtp, got %q", c.MailDriver)
+	}
+	return nil
+}
+
 // Secrets holds the master key that encrypts tenant secrets at rest (AES-256-GCM, PLAN section 6).
 type Secrets struct {
 	MasterKey string `env:"MARPOKAT_MASTER_KEY,required"`

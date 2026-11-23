@@ -26,21 +26,35 @@ type Querier interface {
 	// transaction ends, so sends to one channel commit in seq order and a reader never sees seq N+1 without N.
 	// With check_frozen, a frozen channel matches nothing.
 	BumpChannelSeq(ctx context.Context, arg BumpChannelSeqParams) (BumpChannelSeqRow, error)
+	// A token that can still be used, locked: it is spent in the same transaction.
+	ConsumeAccountToken(ctx context.Context, arg ConsumeAccountTokenParams) (uuid.UUID, error)
+	CountAccounts(ctx context.Context) (int64, error)
 	CountActiveMembers(ctx context.Context, arg CountActiveMembersParams) (int32, error)
 	CountOutboxPending(ctx context.Context) (int64, error)
+	CountRecentAccountTokens(ctx context.Context, arg CountRecentAccountTokensParams) (int64, error)
+	CountTenantsOfAccount(ctx context.Context, accountID uuid.NullUUID) (int64, error)
 	CountUserReactions(ctx context.Context, arg CountUserReactionsParams) (int32, error)
+	// The website's accounts, sessions and the projects (tenants) they own. Tenant chat data is never touched here.
+	CreateAccount(ctx context.Context, arg CreateAccountParams) (Account, error)
 	// The tenants table is the only one queried without tenant_id (PLAN D1).
 	CreateTenant(ctx context.Context, arg CreateTenantParams) (Tenant, error)
+	DeleteAccountSessions(ctx context.Context, accountID uuid.UUID) error
+	DeleteAccountTokens(ctx context.Context, arg DeleteAccountTokensParams) error
 	// For tokens the push service reported as no longer valid, whoever owned them.
 	DeleteDeviceByToken(ctx context.Context, arg DeleteDeviceByTokenParams) error
 	DeleteDeviceOfUser(ctx context.Context, arg DeleteDeviceOfUserParams) (int64, error)
+	DeleteExpiredSessions(ctx context.Context) (int64, error)
 	DeleteMessageReactions(ctx context.Context, messageID uuid.UUID) error
+	DeleteOtherSessions(ctx context.Context, arg DeleteOtherSessionsParams) error
 	// A bounded batch per call: the cleaner repeats until nothing is left, so one call never holds a long lock.
 	DeleteOutboxPublishedBefore(ctx context.Context, publishedAt *time.Time) (int64, error)
 	DeleteReaction(ctx context.Context, arg DeleteReactionParams) (int64, error)
+	DeleteSession(ctx context.Context, id uuid.UUID) error
 	DeleteUnusedAttachment(ctx context.Context, id uuid.UUID) (int64, error)
 	DeleteUserDevices(ctx context.Context, arg DeleteUserDevicesParams) error
 	FinishAttachment(ctx context.Context, arg FinishAttachmentParams) error
+	GetAccountByEmail(ctx context.Context, lower string) (Account, error)
+	GetAccountByID(ctx context.Context, id uuid.UUID) (Account, error)
 	GetAttachment(ctx context.Context, arg GetAttachmentParams) (Attachment, error)
 	// ids is a comma separated list: the driver cannot encode a uuid array in the simple protocol.
 	GetAttachmentsByIDs(ctx context.Context, arg GetAttachmentsByIDsParams) ([]Attachment, error)
@@ -51,24 +65,34 @@ type Querier interface {
 	GetMessageByClientID(ctx context.Context, arg GetMessageByClientIDParams) (MessageDetail, error)
 	GetMessageByID(ctx context.Context, arg GetMessageByIDParams) (MessageDetail, error)
 	GetMessageBySeq(ctx context.Context, arg GetMessageBySeqParams) (MessageDetail, error)
+	GetSessionByHash(ctx context.Context, tokenHash []byte) (ConsoleSession, error)
 	GetTenantByAPIKey(ctx context.Context, apiKey string) (Tenant, error)
 	GetTenantByID(ctx context.Context, id uuid.UUID) (Tenant, error)
 	GetTenantBySlug(ctx context.Context, slug string) (Tenant, error)
+	GetTenantOfAccount(ctx context.Context, arg GetTenantOfAccountParams) (Tenant, error)
+	GetTenantWithOwner(ctx context.Context, id uuid.UUID) (GetTenantWithOwnerRow, error)
 	GetUserByExternalID(ctx context.Context, arg GetUserByExternalIDParams) (User, error)
 	GetUserByID(ctx context.Context, arg GetUserByIDParams) (User, error)
 	GetUserIDByExternalID(ctx context.Context, arg GetUserIDByExternalIDParams) (uuid.UUID, error)
 	GetUsersByExternalIDs(ctx context.Context, arg GetUsersByExternalIDsParams) ([]User, error)
+	InsertAccountToken(ctx context.Context, arg InsertAccountTokenParams) error
 	InsertAttachment(ctx context.Context, arg InsertAttachmentParams) (Attachment, error)
+	InsertAudit(ctx context.Context, arg InsertAuditParams) error
 	// Every query takes tenant_id (PLAN D1).
 	// For a DM that already exists nothing is inserted and no row comes back (the caller loads it by dm_key).
 	InsertChannel(ctx context.Context, arg InsertChannelParams) (Channel, error)
 	InsertMessage(ctx context.Context, arg InsertMessageParams) error
 	InsertOutbox(ctx context.Context, arg InsertOutboxParams) error
 	InsertReaction(ctx context.Context, arg InsertReactionParams) (int64, error)
+	InsertSession(ctx context.Context, arg InsertSessionParams) error
 	LeaveAllChannels(ctx context.Context, arg LeaveAllChannelsParams) error
 	LinkAttachment(ctx context.Context, arg LinkAttachmentParams) error
+	ListAccountSessions(ctx context.Context, accountID uuid.UUID) ([]ConsoleSession, error)
+	ListAccounts(ctx context.Context, arg ListAccountsParams) ([]Account, error)
 	// Who receives events of a channel: its active members.
 	ListActiveMemberIDs(ctx context.Context, arg ListActiveMemberIDsParams) ([]uuid.UUID, error)
+	ListAllTenantsWithOwner(ctx context.Context) ([]ListAllTenantsWithOwnerRow, error)
+	ListAudit(ctx context.Context, arg ListAuditParams) ([]ConsoleAudit, error)
 	// Everyone who shares an active channel with the user: the audience of their presence.
 	ListCoMemberIDs(ctx context.Context, arg ListCoMemberIDsParams) ([]uuid.UUID, error)
 	// Of the given external ids, those who share an active channel with the user (presence is only for them).
@@ -96,6 +120,7 @@ type Querier interface {
 	ListPushRecipients(ctx context.Context, arg ListPushRecipientsParams) ([]ListPushRecipientsRow, error)
 	ListReactionsOfMessage(ctx context.Context, messageID uuid.UUID) ([]ListReactionsOfMessageRow, error)
 	ListTenants(ctx context.Context) ([]Tenant, error)
+	ListTenantsOfAccount(ctx context.Context, accountID uuid.NullUUID) ([]Tenant, error)
 	// Attachments no message uses, older than the cutoff: never sent, or their message was deleted.
 	ListUnusedAttachments(ctx context.Context, arg ListUnusedAttachmentsParams) ([]Attachment, error)
 	// The channels of one user, newest activity first. Without since only active memberships; with since the channels
@@ -115,11 +140,15 @@ type Querier interface {
 	MarkRead(ctx context.Context, arg MarkReadParams) (int64, error)
 	// Oldest admin, else the oldest member.
 	PickNextOwner(ctx context.Context, arg PickNextOwnerParams) (uuid.UUID, error)
+	PlatformUsage(ctx context.Context) (PlatformUsageRow, error)
 	RemoveMember(ctx context.Context, arg RemoveMemberParams) (int64, error)
 	ReviseMessage(ctx context.Context, arg ReviseMessageParams) error
 	// A tombstone keeps the place of the message and nothing of its content.
 	ReviseMessageDeleted(ctx context.Context, arg ReviseMessageDeletedParams) error
 	ReviseMessageText(ctx context.Context, arg ReviseMessageTextParams) error
+	SetAccountDisabled(ctx context.Context, arg SetAccountDisabledParams) (Account, error)
+	SetAccountEmailVerified(ctx context.Context, id uuid.UUID) error
+	SetAccountPlatformAdmin(ctx context.Context, arg SetAccountPlatformAdminParams) (int64, error)
 	SetAttachmentStatus(ctx context.Context, arg SetAttachmentStatusParams) error
 	SetChannelFrozen(ctx context.Context, arg SetChannelFrozenParams) (int64, error)
 	SetMemberRole(ctx context.Context, arg SetMemberRoleParams) error
@@ -127,12 +156,18 @@ type Querier interface {
 	SoftDeleteChannel(ctx context.Context, arg SoftDeleteChannelParams) error
 	// Everything that changed after the cursor, oldest change first (PLAN D8).
 	SyncMessages(ctx context.Context, arg SyncMessagesParams) ([]MessageDetail, error)
+	// Usage of one tenant. Messages: the sum of the per channel counters of messages (cheap, no scan).
+	TenantUsage(ctx context.Context, forTenant uuid.UUID) (TenantUsageRow, error)
+	TouchSession(ctx context.Context, arg TouchSessionParams) error
 	// Keeps the most recently registered tokens of a user: old phones that never unregistered must not pile up.
 	TrimDevicesOfUser(ctx context.Context, arg TrimDevicesOfUserParams) error
 	UnlinkMessageAttachments(ctx context.Context, messageID uuid.UUID) error
+	UpdateAccountName(ctx context.Context, arg UpdateAccountNameParams) (Account, error)
+	UpdateAccountPassword(ctx context.Context, arg UpdateAccountPasswordParams) error
 	UpdateChannelProfile(ctx context.Context, arg UpdateChannelProfileParams) (Channel, error)
 	UpdateTenantConfig(ctx context.Context, arg UpdateTenantConfigParams) (int64, error)
 	UpdateTenantFCMCredentials(ctx context.Context, arg UpdateTenantFCMCredentialsParams) (int64, error)
+	UpdateTenantName(ctx context.Context, arg UpdateTenantNameParams) (int64, error)
 	UpdateTenantSecret(ctx context.Context, arg UpdateTenantSecretParams) (int64, error)
 	UpdateTenantWebhook(ctx context.Context, arg UpdateTenantWebhookParams) (int64, error)
 	// A push token belongs to whoever registered it last (shared device, account switch).

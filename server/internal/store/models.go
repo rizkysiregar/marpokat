@@ -10,6 +10,28 @@ import (
 	"github.com/google/uuid"
 )
 
+type Account struct {
+	ID              uuid.UUID
+	Email           string
+	Name            string
+	PasswordHash    string
+	EmailVerifiedAt *time.Time
+	IsPlatformAdmin bool
+	DisabledAt      *time.Time
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
+
+type AccountToken struct {
+	ID        uuid.UUID
+	AccountID uuid.UUID
+	Kind      string
+	TokenHash []byte
+	ExpiresAt time.Time
+	UsedAt    *time.Time
+	CreatedAt time.Time
+}
+
 type Attachment struct {
 	ID         uuid.UUID
 	TenantID   uuid.UUID
@@ -54,6 +76,27 @@ type ChannelMember struct {
 	MutedUntil  *time.Time
 	JoinedAt    time.Time
 	LeftAt      *time.Time
+}
+
+type ConsoleAudit struct {
+	ID        uuid.UUID
+	AccountID uuid.UUID
+	Action    string
+	Target    *string
+	Ip        string
+	CreatedAt time.Time
+}
+
+type ConsoleSession struct {
+	ID                uuid.UUID
+	AccountID         uuid.UUID
+	TokenHash         []byte
+	CreatedAt         time.Time
+	LastSeenAt        time.Time
+	ExpiresAt         time.Time
+	AbsoluteExpiresAt time.Time
+	UserAgent         string
+	Ip                string
 }
 
 type Device struct {
@@ -144,6 +187,7 @@ type Tenant struct {
 	CreatedAt         time.Time
 	UpdatedAt         time.Time
 	DisabledAt        *time.Time
+	AccountID         uuid.NullUUID
 }
 
 type User struct {
