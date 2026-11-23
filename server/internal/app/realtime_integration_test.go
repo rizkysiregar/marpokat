@@ -729,3 +729,78 @@ func TestWebSocketRedisConnectionLoss(t *testing.T) {
 		t.Fatalf("delivery after the outage: %v", ev)
 	}
 }
+
+// Someone who keeps presenting wrong credentials is refused, on REST and on the WebSocket, until the window is over.
+// It is the address that is refused, not the app: other addresses, and the same app from them, carry on.
+func TestAnAddressThatKeepsGuessingIsRefused(t *testing.T) {
+	e := newRealtimeEnv(t, 1, nil, withAuthFailureLimit(5))
+	// every other test fails authentication on purpose from 127.0.0.1 (the address of this test's own setup calls too):
+	// their count in the shared Redis must not decide this test
+	rdb := e.pods[0].rdb
+	rdb.Del(context.Background(), rdb.Key("authfail", "127.0.0.1"))
+	tt := e.createTenant(tenant.Config{})
+	e.seed(tt, "alice")
+	ip := "203.0.113." + fmt.Sprint(100+time.Now().UnixNano()%100)
+	other := "198.51.100." + fmt.Sprint(100+time.Now().UnixNano()%100)
+	call := func(from, key, token string) int {
+		req, _ := http.NewRequest("GET", e.srv.URL+"/v1/channels", nil)
+		req.Header.Set("CF-Connecting-IP", from)
+		req.Header.Set("X-Api-Key", key)
+		req.Header.Set("Authorization", "Bearer "+token)
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() { _ = res.Body.Close() }()
+		return res.StatusCode
+	}
+	good := tt.userToken(t, "alice")
+
+	for i := range 5 {
+		if got := call(ip, "mpk_"+strings.Repeat("0", 32), good); got != 401 {
+			t.Fatalf("guess %d: %d", i+1, got)
+		}
+	}
+	// the sixth: refused, even with the right key and token
+	if got := call(ip, tt.APIKey, good); got != 429 {
+		t.Fatalf("a blocked address with the right credentials: %d, want 429", got)
+	}
+	// somebody else is not affected, and neither is this app
+	if got := call(other, tt.APIKey, good); got != 200 {
+		t.Fatalf("another address: %d", got)
+	}
+	// a token that merely expired is not a guess: it never counts
+	exp := tt.tokenFor(t, "alice", time.Minute, time.Now().Add(-time.Hour))
+	for range 8 {
+		if got := call(other, tt.APIKey, exp); got != 401 {
+			t.Fatalf("an expired token: %d", got)
+		}
+	}
+	if got := call(other, tt.APIKey, good); got != 200 {
+		t.Fatalf("expired tokens counted against an address: %d", got)
+	}
+
+	// the WebSocket of the blocked address is refused too (4029)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	c, res, err := websocket.Dial(ctx, e.wsURL(0), &websocket.DialOptions{HTTPHeader: http.Header{"CF-Connecting-IP": {ip}}})
+	if res != nil && res.Body != nil {
+		_ = res.Body.Close()
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = c.CloseNow() }()
+	b, _ := json.Marshal(authFrame(tt.APIKey, good, realtime.ProtocolVersion))
+	if err := c.Write(ctx, websocket.MessageText, b); err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, _, err := c.Read(ctx); err != nil {
+			if code := websocket.CloseStatus(err); code != realtime.CloseRateLimited {
+				t.Fatalf("closed with %d, want %d", code, realtime.CloseRateLimited)
+			}
+			break
+		}
+	}
+}

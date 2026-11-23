@@ -31,6 +31,7 @@ type Deps struct {
 	Options   Options
 	Log       *slog.Logger
 	Metrics   *metrics.Registry // may be nil
+	Guard     auth.FailureGuard // may be nil
 }
 
 type Handler struct {
@@ -45,6 +46,7 @@ type Handler struct {
 	opts     Options
 	log      *slog.Logger
 	metrics  *metrics.Registry
+	guard    auth.FailureGuard
 	now      func() time.Time
 }
 
@@ -52,7 +54,7 @@ func NewHandler(d Deps) *Handler {
 	return &Handler{
 		hub: d.Hub, pub: d.Publisher, presence: d.Presence, tenants: d.Tenants, users: d.Users, userSvc: d.UserSvc,
 		msgs: d.Messages, q: d.Queries, opts: d.Options, log: d.Log.With("subsystem", "websocket"),
-		metrics: d.Metrics, now: time.Now,
+		metrics: d.Metrics, guard: d.Guard, now: time.Now,
 	}
 }
 
@@ -74,7 +76,7 @@ func (h *Handler) serveWS(w http.ResponseWriter, r *http.Request) {
 	}
 	conn.SetReadLimit(h.opts.MaxFrameBytes)
 	ctx, cancel := context.WithCancel(r.Context())
-	newSession(h, conn, ctx, cancel).run()
+	newSession(h, conn, ctx, cancel, httpx.ClientIP(r)).run()
 }
 
 // presenceOf answers who of the given users is online. Only users who share a channel with the caller are answered:

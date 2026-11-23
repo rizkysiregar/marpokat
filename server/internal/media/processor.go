@@ -68,6 +68,23 @@ func (p *Processor) Handle(ctx context.Context, env broker.Envelope, _ broker.De
 		return nil
 	}
 
+	// The upload link works for 15 minutes after /complete verified the size, so the uploader could swap the file for a
+	// bigger one in between. What is processed (and what other people are served) must be what was checked.
+	size, err := p.Objects.Size(ctx, a.ObjectKey)
+	switch {
+	case errors.Is(err, ErrNoObject):
+		p.Log.Warn("the uploaded object is gone, marking the attachment failed", "attachment_id", a.ID)
+		p.count("failed")
+		return p.finish(ctx, a, message.StatusFailed, Result{}, "")
+	case err != nil:
+		return fmt.Errorf("stat attachment %s: %w", a.ID, err)
+	case size != a.Size:
+		p.Log.Warn("the object changed after it was checked, marking the attachment failed", "attachment_id", a.ID, "declared", a.Size, "found", size)
+		p.count("failed")
+		_ = p.Objects.Remove(ctx, a.ObjectKey)
+		return p.finish(ctx, a, message.StatusFailed, Result{}, "")
+	}
+
 	res, err := p.process(ctx, a)
 	switch {
 	case errors.Is(err, ErrUnreadable):

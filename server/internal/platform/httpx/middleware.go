@@ -131,13 +131,18 @@ func WithObservability(log *slog.Logger, m *metrics.Registry) Middleware {
 	}
 }
 
-// ClientIP prefers Cloudflare's header (every public request comes through the tunnel), then the proxy chain.
+// ClientIP is the address of the person behind a request. Every public request comes through Cloudflare's tunnel (which
+// says who it saw in CF-Connecting-IP) and the ingress (X-Real-Ip, X-Forwarded-For); the connection itself is the proxy.
+// A header is only believed when it holds an address: this value keys the limits against guessing credentials.
 func ClientIP(r *http.Request) string {
-	if ip := r.Header.Get("CF-Connecting-IP"); ip != "" {
-		return ip
-	}
-	if ip := r.Header.Get("X-Real-Ip"); ip != "" {
-		return ip
+	for _, v := range []string{
+		r.Header.Get("CF-Connecting-IP"),
+		r.Header.Get("X-Real-Ip"),
+		strings.Split(r.Header.Get("X-Forwarded-For"), ",")[0],
+	} {
+		if v = strings.TrimSpace(v); net.ParseIP(v) != nil {
+			return v
+		}
 	}
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {

@@ -603,3 +603,48 @@ func TestPushSaysWhatKindOfAttachmentWasSent(t *testing.T) {
 		t.Fatalf("push for a file with a caption: %v", d)
 	}
 }
+
+// The upload link works for 15 minutes after /complete checked the size. An uploader who sends a different (bigger)
+// file to the same link in between must not get it processed and served as what was checked.
+func TestAFileSwappedAfterTheCheckIsNotProcessed(t *testing.T) {
+	drainOutbox(t)
+	e := newRealtimeEnv(t, 2, nil, withMedia())
+	tt := e.createTenant(tenant.Config{})
+	e.seed(tt, "alice", "bob")
+	ch := e.dm(tt, "alice", "bob")
+
+	// uploaded and completed, but nobody processes it yet: the worker is not running
+	small := jpegBytes(t, 100, 80)
+	up, r := e.startUpload(tt, "alice", "image/jpeg", len(small), "photo.jpg")
+	if r.status != 201 {
+		t.Fatalf("create: %d %v", r.status, r.body)
+	}
+	if got := putObject(t, up.url, up.headers, small); got != 200 {
+		t.Fatalf("upload: %d", got)
+	}
+	if c := e.asUser(tt, "alice", "POST", "/v1/attachments/"+up.id+"/complete", nil); c.status != 200 {
+		t.Fatalf("complete: %d %v", c.status, c.body)
+	}
+	// now the same link is used again, with another file
+	bigger := jpegBytes(t, 1200, 800)
+	if got := putObject(t, up.url, up.headers, bigger); got != 200 {
+		t.Fatalf("second upload: %d", got)
+	}
+
+	g := newFakeGoogle(t)
+	w := startMediaWorker(t, g, nil)
+	m := e.sendWith(tt, "alice", ch, "", up.id)
+	if m.status != 201 {
+		t.Fatalf("send: %d %v", m.status, m.body)
+	}
+	got := e.waitAttachment(tt, "alice", ch, str(m.at("id")), "failed")
+	if got.at("attachments", 0, "url") != nil || got.at("attachments", 0, "thumbnail_url") != nil {
+		t.Fatalf("a swapped file got links: %v", got.at("attachments", 0))
+	}
+	if _, err := e.files.Size(context.Background(), tt.ID.String()+"/"+up.id); !errors.Is(err, media.ErrNoObject) {
+		t.Fatalf("the swapped object was left in the storage: %v", err)
+	}
+	if v := testutil.ToFloat64(w.metrics.MediaProcessed.WithLabelValues("failed")); v != 1 {
+		t.Errorf("failed metric = %v", v)
+	}
+}

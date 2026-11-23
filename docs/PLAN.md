@@ -7,7 +7,7 @@ yang sama dengan tenant lain nanti, tanpa jalan pintas khusus.
 Dokumen ini acuan utama: keputusan arsitektur, tech stack, desain data dan protokol, pekerjaan infra, integrasi Narrativ,
 serta urutan milestone beserta progress tiap item.
 
-- **Status:** M3 selesai (2026-11-22), M4 berjalan: kode, spec, dan test selesai (juga dengan proses sungguhan); menunggu build M4 di dev dan kredensial FCM Narrativ (NV-07)
+- **Status:** pengembangan MVP selesai (2026-11-23): chat diuji di Narrativ web dan Android dev. Sekarang M8: menyiapkan prod (manifest `apps/marpokat` disiapkan, langkah infra INF-12 menunggu). Push (NV-07) belum diuji di dev
 - **Dibuat:** 2026-11-22
 - **Target MVP:** chat service yang robust untuk 100–1000 user aktif. DM, group, media, reaction. Belum untuk dijual
 - **Repo terkait:** `marpokat` (monorepo ini), `narrativ-backend`, `narrativ-android`, `narrativ-web-client`, `homelabs-gitops`
@@ -30,9 +30,9 @@ tidak dihapus. Keputusan baru ditambahkan ke bagian 2 dengan nomor berikutnya, d
 | M4        | Worker, push notification, retry dan DLQ                   | 🟡 Berjalan |
 | M5        | Media dan reaction, edit/hapus pesan                       | 🟡 Kode selesai, belum diuji di dev |
 | M6        | SDK JS + chat di Narrativ web                              | ✅ Selesai (diuji di dev) |
-| M7        | SDK Android + chat di Narrativ Android                     | 🟡 SDK selesai, Narrativ Android belum |
+| M7        | SDK Android + chat di Narrativ Android                     | 🟡 Chat web ↔ Android jalan di dev; push belum diuji |
 | M9        | Website: landing, daftar akun, manajemen proyek (Laravel)  | 🟡 Console API di Go selesai, Laravel belum |
-| M8        | Hardening dan launch prod                                  | ⚪ Belum |
+| M8        | Hardening dan launch prod                                  | 🟡 Hardening dev selesai, setup prod disiapkan |
 
 Legenda: ⚪ belum, 🟡 berjalan, ✅ selesai, ⛔ terblokir
 
@@ -400,7 +400,7 @@ lewat FCM memakai kredensial tenant. Payload: `channel_id`, `message_id`, nama p
 | INF-10 | Jenkinsfile: test (gofmt, vet, test), build image, push GHCR, update tag di `apps/marpokat-dev`. Pipeline Jenkins dibuat dengan Script Path `server/Jenkinsfile` | `server/Jenkinsfile`| M0 | [x] | build pertama b93975eec3a5 |
 | INF-11 | Argo CD Application `marpokat-dev` (auto-sync)                                                                               | Argo CD             | M0         | [x]    | 2026-11-22 |
 | INF-12 | Prod: database `marpokat` di `infra-postgres-prod`, vhost `/marpokat`, bucket `marpokat-media`, Redis prod 6380 prefix        | infra VM            | M8         | [ ]    |     |
-| INF-13 | `apps/marpokat` (prod, manual sync, promosi tag lewat PR) + hostname `api-marpokat.rizkysiregar.my.id` + Argo Application    | gitops + Cloudflare | M8         | [ ]    |     |
+| INF-13 | `apps/marpokat` (prod, manual sync, promosi tag lewat PR) + hostname `api-marpokat.rizkysiregar.my.id` + Argo Application    | gitops + Cloudflare | M8         | [ ]    | manifest + README langkah setup disiapkan (gitops PR); sisa: Cloudflare, Argo app, sync pertama |
 | INF-14 | Dashboard Grafana (koneksi WS, pesan/detik, latensi kirim, panjang queue, isi DLQ) + alert DLQ tidak kosong                  | monitoring          | M8         | [ ]    |     |
 | INF-15 | Backup harian database `marpokat` dan uji restore                                                                            | infra VM            | M8         | [ ]    |     |
 
@@ -417,8 +417,8 @@ lewat FCM memakai kredensial tenant. Payload: `channel_id`, `message_id`, nama p
 | NV-05 | `POST /api/v1/chat/dm/{userId}`: cek diri sendiri dan blokir (user di sisi blokir dianggap tidak ada), lalu buat atau ambil DM di Marpokat | narrativ-backend | M2 | [x] | narrativ-backend#82 |
 | NV-06 | Saat user memblokir user lain: freeze channel DM keduanya                                                                              | narrativ-backend         | M5         | [x]    | narrativ-backend#83 |
 | NV-07 | Kredensial FCM project Firebase Narrativ (dev, lalu prod) disimpan di tenant: `kubectl -n narrativ-dev get secret narrativ-firebase-dev -o jsonpath='{.data.credentials\.json}' \| base64 -d \| kubectl -n marpokat-dev exec -i deploy/marpokat-api -- marpokat tenant set-fcm --slug narrativ-dev --file -` | marpokat CLI | M4 | [ ] |     |
-| NV-08 | Layar chat web: daftar channel, ruang chat, kirim media, reaction, unread badge, tombol "Kirim pesan" di profil                        | narrativ-web-client      | M6         | [ ]    |     |
-| NV-09 | Layar chat Android (Compose): sama dengan NV-08, plus deep link dari push                                                               | narrativ-android         | M7         | [ ]    |     |
+| NV-08 | Layar chat web: daftar channel, ruang chat, kirim media, reaction, unread badge, tombol "Kirim pesan" di profil                        | narrativ-web-client      | M6         | [x]    | narrativ-web-client#16 |
+| NV-09 | Layar chat Android (Compose): sama dengan NV-08, plus deep link dari push                                                               | narrativ-android         | M7         | [x]    | narrativ-android#59; deep link dari push menunggu NV-07 |
 | NV-10 | Hapus akun Narrativ juga menghapus/anonimkan user di Marpokat                                                                          | narrativ-backend         | M8         | [ ]    |     |
 
 ---
@@ -534,6 +534,7 @@ lewat FCM memakai kredensial tenant. Payload: `channel_id`, `message_id`, nama p
 - [x] Registrasi push token dan `MarpokatPush.parse` untuk payload FCM
 - [x] Publish ke GitHub Packages (Maven), `marpokat-core` dan `marpokat-android` 0.1.0
 - [x] NV-09: narrativ-android PR #59 (diuji di perangkat: chat jalan)
+- [x] Chat lintas web ↔ Android di Narrativ dev: diuji 2026-11-22 malam, jalan
 - [ ] **Selesai jika:** chat lintas web ↔ Android di Narrativ dev, push membuka ruang chat yang benar. Sudah terbukti: core terhadap server sungguhan (`LiveServerTest`, dua klien); 22 tes klien + 6 tes OkHttp/MockWebServer + 5 tes push. Cache Room belum punya tes instrumented
 
 ### M9: Website 🟡
@@ -557,10 +558,10 @@ Hardening di dev (2026-11-23), sebelum prod:
 - [x] Probe 1980 request rusak (NUL, unicode aneh, JSON bersarang 30 ribu level, id panjang, kredensial salah) ke setiap route di spec: satu bug, byte NUL di parameter jalur menjadi 500 → dijaga di tengah (400) untuk path, query, body JSON dan frame WebSocket
 - [x] Rate limit REST umum per pemanggil (user: 60 burst, 20/detik; backend tenant: 200 burst, 100/detik), di luar batas kirim pesan dan upload yang sudah ada
 - [x] Audit: query berkunci tenant (sisanya berkunci UUID yang sudah dimuat lewat query bertenant), batas body 64 KB dan frame WS, JWT dikunci HS256, tidak ada secret di log
-- [ ] Batas koneksi WebSocket per user (belum ada: satu user bisa membuka ratusan)
-- [ ] Redis dev dan prod tanpa password, port terbuka di LAN VM (`requirepass`/ACL)
-- [ ] Throttle percobaan API key salah per IP (sekarang hanya Cloudflare)
-- [ ] URL presigned PUT masih bisa menimpa objek sampai kedaluwarsa (15 menit) setelah `complete`: worker perlu memeriksa ulang ukuran
+- [x] Batas koneksi WebSocket per user: **sudah ada** (10 per user di semua pod, ditolak 4029, ada tes). Catatan "belum ada" sebelumnya keliru
+- [x] Throttle kredensial salah per alamat (API key tidak dikenal atau token palsu: 30 per 10 menit, lalu 429 sampai jendela habis, termasuk di WebSocket); token kedaluwarsa dan user belum dibuat tidak dihitung
+- [x] URL presigned PUT yang dipakai lagi setelah `complete`: worker memeriksa ulang ukuran objek, yang berubah ditandai gagal dan dihapus
+- [x] Redis: `REDIS_USERNAME` (user ACL yang hanya menjangkau key `marpokat-prod:*` dan tanpa perintah berbahaya), diuji dengan alur chat penuh. Menerapkannya di VM adalah langkah Anda (INF-12)
 
 
 - [ ] Webhook ke tenant (event pesan, signature HMAC, retry + DLQ)
@@ -611,3 +612,4 @@ kemungkinan untuk semuanya.
 | 2026-11-22 | M2 selesai: diuji dengan dua akun di dev                                       |
 | 2026-11-22 | M3 dikerjakan: D39–D46, WebSocket, fan-out Redis, typing, presence, rate limit, CORS |
 | 2026-11-22 | M3 selesai: diuji lewat wss di dev. M4 dikerjakan: D47–D53, relay outbox, RabbitMQ, push FCM, perangkat |
+| 2026-11-23 | Pengembangan MVP ditutup: chat diuji di Narrativ web + Android dev. M8: manifest prod `apps/marpokat` disiapkan |

@@ -176,3 +176,84 @@ func TestWithoutALimiterNothingIsLimited(t *testing.T) {
 		t.Fatalf("status %d", status)
 	}
 }
+
+type scriptedGuard struct {
+	blockedFor time.Duration
+	failures   []string
+	checked    []string
+}
+
+func (g *scriptedGuard) Blocked(_ context.Context, ip string) (bool, time.Duration) {
+	g.checked = append(g.checked, ip)
+	return g.blockedFor > 0, g.blockedFor
+}
+
+func (g *scriptedGuard) Failed(_ context.Context, ip string) { g.failures = append(g.failures, ip) }
+
+func callFrom(h http.Handler, ip, apiKey, token string) int {
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("CF-Connecting-IP", ip)
+	if apiKey != "" {
+		req.Header.Set(HeaderAPIKey, apiKey)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	httpx.WithRequestID()(h).ServeHTTP(rec, req)
+	return rec.Code
+}
+
+func TestFailureGuardCountsGuessesButNotExpiredTokensOrUnknownUsers(t *testing.T) {
+	m := newMW()
+	g := &scriptedGuard{}
+	m.SetFailureGuard(g)
+	h := m.User(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+
+	valid, _ := SignUserToken(secret, "u_1", time.Hour, now)
+	expired, _ := SignUserToken(secret, "u_1", time.Minute, now.Add(-time.Hour))
+	unknownUser, _ := SignUserToken(secret, "u_404", time.Hour, now)
+	forged, _ := SignUserToken([]byte("another-secret-another-secret-another-secret"), "u_1", time.Hour, now)
+
+	for name, c := range map[string]struct {
+		key, token string
+		counts     bool
+	}{
+		"no api key":      {"", valid, true},
+		"no token":        {"mpk_a", "", true},
+		"unknown api key": {"mpk_x", valid, true},
+		"forged token":    {"mpk_a", forged, true},
+		"expired token":   {"mpk_a", expired, false}, // clients refresh these all the time
+		"unknown user":    {"mpk_a", unknownUser, false},
+		"valid":           {"mpk_a", valid, false},
+	} {
+		g.failures = nil
+		callFrom(h, "203.0.113.7", c.key, c.token)
+		if got := len(g.failures) == 1 && g.failures[0] == "203.0.113.7"; got != c.counts {
+			t.Errorf("%s: counted=%v (%v), want %v", name, got, g.failures, c.counts)
+		}
+	}
+}
+
+func TestAnAddressThatUsedUpItsFailuresIsRefusedBeforeAnythingIsLookedAt(t *testing.T) {
+	m := newMW()
+	g := &scriptedGuard{blockedFor: 7 * time.Minute}
+	m.SetFailureGuard(g)
+	reached := false
+	h := m.User(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached = true }))
+	valid, _ := SignUserToken(secret, "u_1", time.Hour, now)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("X-Forwarded-For", "203.0.113.50")
+	req.Header.Set(HeaderAPIKey, "mpk_a")
+	req.Header.Set("Authorization", "Bearer "+valid)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusTooManyRequests || rec.Header().Get("Retry-After") != "420" || reached {
+		t.Fatalf("status %d, Retry-After %q, handler reached %v: even a right key is refused from a blocked address", rec.Code, rec.Header().Get("Retry-After"), reached)
+	}
+	if len(g.checked) != 1 || g.checked[0] != "203.0.113.50" || len(g.failures) != 0 {
+		t.Fatalf("checked %v, failures %v: being refused is not another failure", g.checked, g.failures)
+	}
+}

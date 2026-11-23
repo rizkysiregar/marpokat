@@ -29,6 +29,7 @@ type Session struct {
 	h    *Handler
 	conn *websocket.Conn
 	id   string
+	ip   string // the address behind the connection, for the limit on wrong credentials
 	ctx  context.Context
 	// cancel ends ctx when the session is over; it never interrupts a Read, closing the connection does.
 	cancel context.CancelFunc
@@ -58,9 +59,10 @@ type typingState struct {
 	lastStart time.Time
 }
 
-func newSession(h *Handler, conn *websocket.Conn, ctx context.Context, cancel context.CancelFunc) *Session {
+func newSession(h *Handler, conn *websocket.Conn, ctx context.Context, cancel context.CancelFunc, ip string) *Session {
 	return &Session{
 		h:         h,
+		ip:        ip,
 		conn:      conn,
 		id:        uuid.NewString(),
 		ctx:       ctx,
@@ -136,6 +138,13 @@ func (s *Session) writeLoop() {
 }
 
 // reject answers a failed handshake with an error frame and ends the connection.
+// failed counts a wrong credential against the address of this connection (see auth.FailureGuard).
+func (s *Session) failed() {
+	if s.h.guard != nil {
+		s.h.guard.Failed(s.ctx, s.ip)
+	}
+}
+
 func (s *Session) reject(code websocket.StatusCode, id, errCode, msg string) {
 	_ = s.write(encode(typeError, id, errorData{Code: errCode, Message: msg}, time.Now()))
 	s.requestClose(code, msg)
@@ -170,8 +179,15 @@ func (s *Session) authenticate() bool {
 		return false
 	}
 
+	if h.guard != nil {
+		if blocked, _ := h.guard.Blocked(s.ctx, s.ip); blocked {
+			s.reject(CloseRateLimited, f.ID, httpx.CodeRateLimited, "too many failed attempts from this address, try again later")
+			return false
+		}
+	}
 	t, secret, err := h.tenants.Resolve(s.ctx, strings.TrimSpace(a.APIKey))
 	if errors.Is(err, tenant.ErrNotFound) {
+		s.failed()
 		s.reject(CloseAuthFailed, f.ID, httpx.CodeUnauthenticated, "unknown or disabled api key")
 		return false
 	}
@@ -186,6 +202,7 @@ func (s *Session) authenticate() bool {
 		s.reject(CloseTokenExpired, f.ID, httpx.CodeTokenExpired, "token expired")
 		return false
 	case err != nil:
+		s.failed()
 		s.reject(CloseAuthFailed, f.ID, httpx.CodeUnauthenticated, err.Error())
 		return false
 	}

@@ -21,6 +21,7 @@ type Client struct {
 func Open(ctx context.Context, c config.Redis) (*Client, error) {
 	rc := redis.NewClient(&redis.Options{
 		Addr:         c.Addr(),
+		Username:     c.Username,
 		Password:     c.Password,
 		DB:           c.DB,
 		DialTimeout:  5 * time.Second,
@@ -38,7 +39,7 @@ func Open(ctx context.Context, c config.Redis) (*Client, error) {
 
 // NewUnconnected builds a client without checking that Redis answers. For tests of failure handling.
 func NewUnconnected(c config.Redis) *Client {
-	rc := redis.NewClient(&redis.Options{Addr: c.Addr(), Password: c.Password, DB: c.DB, DialTimeout: time.Second, MaxRetries: -1})
+	rc := redis.NewClient(&redis.Options{Addr: c.Addr(), Username: c.Username, Password: c.Password, DB: c.DB, DialTimeout: time.Second, MaxRetries: -1})
 	return &Client{Client: rc, prefix: c.KeyPrefix}
 }
 
