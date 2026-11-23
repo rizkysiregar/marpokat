@@ -53,8 +53,11 @@ func (p Postgres) DSN() string {
 }
 
 type Redis struct {
-	Host     string `env:"REDIS_HOST,required"`
-	Port     int    `env:"REDIS_PORT" envDefault:"6379"`
+	Host string `env:"REDIS_HOST,required"`
+	Port int    `env:"REDIS_PORT" envDefault:"6379"`
+	// Username is for a Redis ACL user (Redis 6+): with it Marpokat can have credentials of its own that only reach its
+	// own keys, without touching the password (or the lack of one) other apps on the same Redis use.
+	Username string `env:"REDIS_USERNAME"`
 	Password string `env:"REDIS_PASSWORD"`
 	DB       int    `env:"REDIS_DB" envDefault:"0"`
 	// KeyPrefix is put in front of every key AND every Pub/Sub channel. Pub/Sub ignores the DB index,

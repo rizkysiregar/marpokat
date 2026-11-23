@@ -286,7 +286,7 @@ The codes are shared with REST (`Error.code` in openapi.yaml).
 | `4004` | Token expired                    | Refresh token, reconnect              |
 | `4005` | Unsupported `protocol_version`   | Do not reconnect; upgrade the SDK     |
 | `4008` | Heartbeat timeout                | Reconnect                             |
-| `4029` | Too many connections of this user | Close another connection first, then reconnect with backoff |
+| `4029` | Too many connections of this user, or too many wrong credentials from this address (30 in 10 minutes) | Close another connection first, or wait, then reconnect with backoff |
 | `1011` | Server error, or realtime not ready yet (a starting pod) | Reconnect with backoff |
 | `1013` | The client did not read its events fast enough (its queue of 256 events was full) | Reconnect, then sync |
 

@@ -41,10 +41,17 @@ type pod struct {
 // envOption changes how newRealtimeEnv builds its pods.
 type envOption func(*envConfig)
 
-type envConfig struct{ media bool }
+type envConfig struct {
+	media bool
+	// authFailures is how many wrong credentials one address may present; high, because every test comes from 127.0.0.1
+	authFailures int
+}
 
 // withMedia gives the pods object storage (a MinIO container), which turns on attachments.
 func withMedia() envOption { return func(c *envConfig) { c.media = true } }
+
+// withAuthFailureLimit sets how many wrong credentials one address may present before it is refused.
+func withAuthFailureLimit(n int) envOption { return func(c *envConfig) { c.authFailures = n } }
 
 // newRealtimeEnv starts n pods. tweak shortens timings for the test.
 func newRealtimeEnv(t *testing.T, n int, tweak func(*realtime.Options), options ...envOption) *env {
@@ -58,7 +65,7 @@ func newRealtimeEnv(t *testing.T, n int, tweak func(*realtime.Options), options 
 	if tweak != nil {
 		tweak(&opts)
 	}
-	var cfg envConfig
+	cfg := envConfig{authFailures: 1_000_000}
 	for _, o := range options {
 		o(&cfg)
 	}
@@ -76,7 +83,7 @@ func newRealtimeEnv(t *testing.T, n int, tweak func(*realtime.Options), options 
 		hub := realtime.NewHub(rdb, log, opts, nil)
 		hubCtx, stop := context.WithCancel(context.Background())
 		go hub.Run(hubCtx)
-		h := httpx.Chain(PublicRoutes(Deps{Info: Info{Version: "test"}, Pool: pool, Box: box, Log: log, Redis: rdb, Hub: hub, Realtime: opts, Storage: files}),
+		h := httpx.Chain(PublicRoutes(Deps{Info: Info{Version: "test"}, Pool: pool, Box: box, Log: log, Redis: rdb, Hub: hub, Realtime: opts, Storage: files, AuthFailuresPerAddress: cfg.authFailures}),
 			httpx.WithCORS(), httpx.WithRequestID())
 		srv := httptest.NewServer(h)
 		srv.Config.RegisterOnShutdown(hub.Shutdown)

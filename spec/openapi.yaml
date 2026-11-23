@@ -45,6 +45,7 @@ info:
     | `client_msg_id` | 64 characters |
     | REST requests | 60 burst, 20 per second per user (all devices together); 200 burst, 100 per second per tenant backend |
     | JSON body | 64 KB |
+    | Wrong credentials | 30 per address in 10 minutes (unknown api key, missing or forged token); then `429` for that address until the 10 minutes are over, even with the right credentials. Expired tokens and unknown users do not count |
 
     Text anywhere in a request (JSON, path, query, WebSocket frames) must not contain the NUL character: it is
     answered with `400 bad_request`.

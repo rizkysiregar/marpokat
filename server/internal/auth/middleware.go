@@ -68,12 +68,42 @@ const (
 	serverRequestsPerSecond = 100
 )
 
+// FailureGuard is ratelimit.Guard: it refuses an address that keeps presenting credentials that do not work.
+type FailureGuard interface {
+	Blocked(ctx context.Context, ip string) (bool, time.Duration)
+	Failed(ctx context.Context, ip string)
+}
+
 type Middleware struct {
 	tenants TenantResolver
 	users   UserLookup
 	log     *slog.Logger
 	now     func() time.Time
 	limiter RequestLimiter
+	guard   FailureGuard
+}
+
+// SetFailureGuard turns on the limit on failed authentication per address. Without it nothing is limited here.
+func (m *Middleware) SetFailureGuard(g FailureGuard) { m.guard = g }
+
+// blocked answers 429 itself for an address that used up its failures, before anything is looked at.
+func (m *Middleware) blocked(w http.ResponseWriter, r *http.Request) bool {
+	if m.guard == nil {
+		return false
+	}
+	if ok, wait := m.guard.Blocked(r.Context(), httpx.ClientIP(r)); ok {
+		httpx.WriteErr(w, r, m.log, httpx.ErrRateLimited(wait, "too many failed attempts from this address, try again later"))
+		return true
+	}
+	return false
+}
+
+// failed counts a credential that was wrong (a missing or unknown api key, a forged token). An expired token or a user
+// the app has not created yet are not guesses and do not count.
+func (m *Middleware) failed(r *http.Request) {
+	if m.guard != nil {
+		m.guard.Failed(r.Context(), httpx.ClientIP(r))
+	}
 }
 
 // SetRequestLimiter turns on the limit on every authenticated REST request. Without it nothing is limited here.
@@ -146,18 +176,24 @@ func (m *Middleware) Server(next http.Handler) http.Handler {
 
 // credentials resolves the api key and extracts the bearer token, writing the error response itself.
 func (m *Middleware) credentials(w http.ResponseWriter, r *http.Request) (tenant.Tenant, []byte, string, bool) {
+	if m.blocked(w, r) {
+		return tenant.Tenant{}, nil, "", false
+	}
 	apiKey := strings.TrimSpace(r.Header.Get(HeaderAPIKey))
 	if apiKey == "" {
+		m.failed(r)
 		m.unauthorized(w, r, httpx.CodeUnauthenticated, "missing "+HeaderAPIKey+" header")
 		return tenant.Tenant{}, nil, "", false
 	}
 	token, ok := bearer(r.Header.Get("Authorization"))
 	if !ok {
+		m.failed(r)
 		m.unauthorized(w, r, httpx.CodeUnauthenticated, "missing Authorization: Bearer <token> header")
 		return tenant.Tenant{}, nil, "", false
 	}
 	t, secret, err := m.tenants.Resolve(r.Context(), apiKey)
 	if errors.Is(err, tenant.ErrNotFound) {
+		m.failed(r)
 		m.unauthorized(w, r, httpx.CodeUnauthenticated, "unknown or disabled api key")
 		return tenant.Tenant{}, nil, "", false
 	}
@@ -169,6 +205,9 @@ func (m *Middleware) credentials(w http.ResponseWriter, r *http.Request) (tenant
 }
 
 func (m *Middleware) reject(w http.ResponseWriter, r *http.Request, err error) {
+	if !errors.Is(err, ErrTokenExpired) {
+		m.failed(r)
+	}
 	if errors.Is(err, ErrTokenExpired) {
 		m.unauthorized(w, r, httpx.CodeTokenExpired, "token expired")
 		return

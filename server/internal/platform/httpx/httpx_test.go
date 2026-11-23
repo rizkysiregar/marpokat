@@ -187,3 +187,30 @@ func TestCleanInputRefusesNULInPathAndQuery(t *testing.T) {
 		t.Errorf("handler reached %d times, want 2", reached)
 	}
 }
+
+func TestClientIP(t *testing.T) {
+	req := func(remote string, headers map[string]string) *http.Request {
+		r := httptest.NewRequest(http.MethodGet, "/", nil)
+		r.RemoteAddr = remote
+		for k, v := range headers {
+			r.Header.Set(k, v)
+		}
+		return r
+	}
+	for name, c := range map[string]struct {
+		r    *http.Request
+		want string
+	}{
+		"cloudflare first":      {req("10.0.0.1:5000", map[string]string{"CF-Connecting-IP": "203.0.113.7", "X-Forwarded-For": "198.51.100.1"}), "203.0.113.7"},
+		"real ip":               {req("10.0.0.1:5000", map[string]string{"X-Real-Ip": "203.0.113.8"}), "203.0.113.8"},
+		"forwarded for, first":  {req("10.0.0.1:5000", map[string]string{"X-Forwarded-For": "203.0.113.9, 10.0.0.2"}), "203.0.113.9"},
+		"ipv6":                  {req("10.0.0.1:5000", map[string]string{"CF-Connecting-IP": "2001:db8::1"}), "2001:db8::1"},
+		"nonsense is ignored":   {req("10.0.0.1:5000", map[string]string{"CF-Connecting-IP": "not-an-ip", "X-Forwarded-For": "<script>"}), "10.0.0.1"},
+		"the connection":        {req("192.0.2.4:1234", nil), "192.0.2.4"},
+		"no port in the remote": {req("192.0.2.4", nil), "192.0.2.4"},
+	} {
+		if got := ClientIP(c.r); got != c.want {
+			t.Errorf("%s: %q, want %q", name, got, c.want)
+		}
+	}
+}

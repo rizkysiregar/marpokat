@@ -557,10 +557,10 @@ Hardening di dev (2026-11-23), sebelum prod:
 - [x] Probe 1980 request rusak (NUL, unicode aneh, JSON bersarang 30 ribu level, id panjang, kredensial salah) ke setiap route di spec: satu bug, byte NUL di parameter jalur menjadi 500 → dijaga di tengah (400) untuk path, query, body JSON dan frame WebSocket
 - [x] Rate limit REST umum per pemanggil (user: 60 burst, 20/detik; backend tenant: 200 burst, 100/detik), di luar batas kirim pesan dan upload yang sudah ada
 - [x] Audit: query berkunci tenant (sisanya berkunci UUID yang sudah dimuat lewat query bertenant), batas body 64 KB dan frame WS, JWT dikunci HS256, tidak ada secret di log
-- [ ] Batas koneksi WebSocket per user (belum ada: satu user bisa membuka ratusan)
-- [ ] Redis dev dan prod tanpa password, port terbuka di LAN VM (`requirepass`/ACL)
-- [ ] Throttle percobaan API key salah per IP (sekarang hanya Cloudflare)
-- [ ] URL presigned PUT masih bisa menimpa objek sampai kedaluwarsa (15 menit) setelah `complete`: worker perlu memeriksa ulang ukuran
+- [x] Batas koneksi WebSocket per user: **sudah ada** (10 per user di semua pod, ditolak 4029, ada tes). Catatan "belum ada" sebelumnya keliru
+- [x] Throttle kredensial salah per alamat (API key tidak dikenal atau token palsu: 30 per 10 menit, lalu 429 sampai jendela habis, termasuk di WebSocket); token kedaluwarsa dan user belum dibuat tidak dihitung
+- [x] URL presigned PUT yang dipakai lagi setelah `complete`: worker memeriksa ulang ukuran objek, yang berubah ditandai gagal dan dihapus
+- [x] Redis: `REDIS_USERNAME` (user ACL yang hanya menjangkau key `marpokat-prod:*` dan tanpa perintah berbahaya), diuji dengan alur chat penuh. Menerapkannya di VM adalah langkah Anda (INF-12)
 
 
 - [ ] Webhook ke tenant (event pesan, signature HMAC, retry + DLQ)

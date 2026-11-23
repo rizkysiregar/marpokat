@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -40,6 +41,9 @@ type Deps struct {
 	Storage *media.Storage
 	// Realtime overrides the realtime timings; the zero value means realtime.DefaultOptions().
 	Realtime realtime.Options
+	// AuthFailuresPerAddress is how many wrong credentials one address may present in 10 minutes before it is refused;
+	// the zero value means 30. (Tests that fail authentication on purpose raise it: they all come from 127.0.0.1.)
+	AuthFailuresPerAddress int
 }
 
 // PublicRoutes builds the public router: every feature module registers its routes here.
@@ -59,6 +63,16 @@ func PublicRoutes(d Deps) http.Handler {
 	channels.SetHydrator(hydrator)
 	messages.SetHydrator(hydrator)
 
+	// 30 wrong credentials in 10 minutes from one address and it is refused until the 10 minutes are over
+	var guard *ratelimit.Guard
+	if d.Redis != nil {
+		limit := d.AuthFailuresPerAddress
+		if limit <= 0 {
+			limit = 30
+		}
+		guard = ratelimit.NewGuard(d.Redis, d.Log, limit, 10*time.Minute)
+	}
+
 	mux := http.NewServeMux()
 	// reachable through Cloudflare, used to check the tunnel and ingress; no dependency checks
 	mux.HandleFunc("GET /healthz", health.LiveHandler)
@@ -69,6 +83,7 @@ func PublicRoutes(d Deps) http.Handler {
 	if d.Redis != nil {
 		messages.SetLimiter(ratelimit.New(d.Redis, d.Log))
 		mw.SetRequestLimiter(ratelimit.New(d.Redis, d.Log))
+		mw.SetFailureGuard(guard)
 	}
 	if d.Redis != nil && d.Hub != nil {
 		opts := d.Realtime
@@ -81,7 +96,7 @@ func PublicRoutes(d Deps) http.Handler {
 		realtime.NewHandler(realtime.Deps{
 			Hub: d.Hub, Publisher: publisher, Presence: realtime.NewPresence(d.Redis, opts.PresenceTTL),
 			Tenants: resolver, Users: lookup, UserSvc: users, Messages: messages, Queries: store.New(d.Pool),
-			Options: opts, Log: d.Log, Metrics: d.Metrics,
+			Options: opts, Log: d.Log, Metrics: d.Metrics, Guard: guardOrNil(guard),
 		}).Register(mux, mw.User)
 	}
 	if d.Storage != nil {
@@ -106,4 +121,12 @@ func userLookup(users *user.Service) auth.UserLookup {
 		}
 		return id, err
 	}
+}
+
+// guardOrNil keeps a nil *Guard from becoming a non-nil interface (which would be called and crash).
+func guardOrNil(g *ratelimit.Guard) auth.FailureGuard {
+	if g == nil {
+		return nil
+	}
+	return g
 }
