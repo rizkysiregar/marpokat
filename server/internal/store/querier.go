@@ -26,6 +26,7 @@ type Querier interface {
 	// transaction ends, so sends to one channel commit in seq order and a reader never sees seq N+1 without N.
 	// With check_frozen, a frozen channel matches nothing.
 	BumpChannelSeq(ctx context.Context, arg BumpChannelSeqParams) (BumpChannelSeqRow, error)
+	CancelAccountDeletion(ctx context.Context, id uuid.UUID) (Account, error)
 	// Restoring keeps the project switched off: the owner switches it on when ready.
 	CancelTenantDeletion(ctx context.Context, id uuid.UUID) (Tenant, error)
 	// A token that can still be used, locked: it is spent in the same transaction.
@@ -41,6 +42,8 @@ type Querier interface {
 	CreateAccount(ctx context.Context, arg CreateAccountParams) (Account, error)
 	// The tenants table is the only one queried without tenant_id (PLAN D1).
 	CreateTenant(ctx context.Context, arg CreateTenantParams) (Tenant, error)
+	// Sessions, tokens and the security log go with it (ON DELETE CASCADE).
+	DeleteAccountRow(ctx context.Context, id uuid.UUID) error
 	DeleteAccountSessions(ctx context.Context, accountID uuid.UUID) error
 	DeleteAccountTokens(ctx context.Context, arg DeleteAccountTokensParams) error
 	// For tokens the push service reported as no longer valid, whoever owned them.
@@ -92,9 +95,10 @@ type Querier interface {
 	InsertReaction(ctx context.Context, arg InsertReactionParams) (int64, error)
 	InsertSession(ctx context.Context, arg InsertSessionParams) error
 	LeaveAllChannels(ctx context.Context, arg LeaveAllChannelsParams) error
+	// Lifts only what the account caused; a suspension the admin put on a project stays.
+	LiftAccountSuspensionsOfTenants(ctx context.Context, accountID uuid.NullUUID) ([]uuid.UUID, error)
 	LinkAttachment(ctx context.Context, arg LinkAttachmentParams) error
 	ListAccountSessions(ctx context.Context, accountID uuid.UUID) ([]ConsoleSession, error)
-	// Accounts in id order, optionally only those whose e-mail or name contains the search (an ILIKE pattern, escaped).
 	ListAccounts(ctx context.Context, arg ListAccountsParams) ([]Account, error)
 	// Who receives events of a channel: its active members.
 	ListActiveMemberIDs(ctx context.Context, arg ListActiveMemberIDsParams) ([]uuid.UUID, error)
@@ -129,6 +133,7 @@ type Querier interface {
 	// yet, with the unread count to show. Whether they are online is decided later, from presence.
 	ListPushRecipients(ctx context.Context, arg ListPushRecipientsParams) ([]ListPushRecipientsRow, error)
 	ListReactionsOfMessage(ctx context.Context, messageID uuid.UUID) ([]ListReactionsOfMessageRow, error)
+	ListTenantIDsOfAccount(ctx context.Context, accountID uuid.NullUUID) ([]ListTenantIDsOfAccountRow, error)
 	ListTenants(ctx context.Context) ([]Tenant, error)
 	ListTenantsOfAccount(ctx context.Context, accountID uuid.NullUUID) ([]Tenant, error)
 	// Attachments no message uses, older than the cutoff: never sent, or their message was deleted.
@@ -140,6 +145,8 @@ type Querier interface {
 	LockAttachment(ctx context.Context, arg LockAttachmentParams) (Attachment, error)
 	// Serialises changes to one channel (members, name, sends) until the transaction ends.
 	LockChannel(ctx context.Context, arg LockChannelParams) (Channel, error)
+	// The next account whose grace period is over, locked so that two workers never purge the same one.
+	LockDueAccountDeletion(ctx context.Context) (LockDueAccountDeletionRow, error)
 	// The next project whose grace period is over, locked so that two workers never purge the same one.
 	LockDueTenantDeletion(ctx context.Context) (LockDueTenantDeletionRow, error)
 	// The oldest unpublished events, locked for this transaction. Another worker skips them instead of waiting, so any
@@ -168,11 +175,16 @@ type Querier interface {
 	// A tombstone keeps the place of the message and nothing of its content.
 	ReviseMessageDeleted(ctx context.Context, arg ReviseMessageDeletedParams) error
 	ReviseMessageText(ctx context.Context, arg ReviseMessageTextParams) error
+	// An account to delete; one already scheduled keeps its date.
+	ScheduleAccountDeletion(ctx context.Context, arg ScheduleAccountDeletionParams) (Account, error)
 	// Switches the project off and sets when it goes for good. A project already scheduled keeps its date.
 	ScheduleTenantDeletion(ctx context.Context, arg ScheduleTenantDeletionParams) (Tenant, error)
+	SetAccountDeleteNow(ctx context.Context, id uuid.UUID) (Account, error)
 	SetAccountDisabled(ctx context.Context, arg SetAccountDisabledParams) (Account, error)
 	SetAccountEmailVerified(ctx context.Context, id uuid.UUID) error
 	SetAccountPlatformAdmin(ctx context.Context, arg SetAccountPlatformAdminParams) (uuid.UUID, error)
+	// Accounts in id order, optionally only those whose e-mail or name contains the search (an ILIKE pattern, escaped).
+	SetAccountSuspended(ctx context.Context, arg SetAccountSuspendedParams) (Account, error)
 	SetAttachmentStatus(ctx context.Context, arg SetAttachmentStatusParams) error
 	SetChannelFrozen(ctx context.Context, arg SetChannelFrozenParams) (int64, error)
 	SetMemberRole(ctx context.Context, arg SetMemberRoleParams) error
@@ -180,8 +192,11 @@ type Querier interface {
 	SetTenantDeleteNow(ctx context.Context, id uuid.UUID) (Tenant, error)
 	SetTenantDisabled(ctx context.Context, arg SetTenantDisabledParams) (int64, error)
 	SetTenantEnvironment(ctx context.Context, arg SetTenantEnvironmentParams) (Tenant, error)
+	// A suspension of the project itself (the platform admin, source 'project').
 	SetTenantSuspended(ctx context.Context, arg SetTenantSuspendedParams) (Tenant, error)
 	SoftDeleteChannel(ctx context.Context, arg SoftDeleteChannelParams) error
+	// The projects of an account that is suspended or being deleted. Those already suspended keep their own reason.
+	SuspendTenantsOfAccount(ctx context.Context, arg SuspendTenantsOfAccountParams) ([]uuid.UUID, error)
 	// Everything that changed after the cursor, oldest change first (PLAN D8).
 	SyncMessages(ctx context.Context, arg SyncMessagesParams) ([]MessageDetail, error)
 	// Usage of one tenant. Messages: the sum of the per channel counters of messages (cheap, no scan).

@@ -15,7 +15,7 @@ const createTenant = `-- name: CreateTenant :one
 
 INSERT INTO tenants (id, slug, name, api_key, api_secret_enc, config, account_id)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after, environment, suspended_at, suspended_reason
+RETURNING id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after, environment, suspended_at, suspended_reason, suspension_source
 `
 
 type CreateTenantParams struct {
@@ -58,12 +58,13 @@ func (q *Queries) CreateTenant(ctx context.Context, arg CreateTenantParams) (Ten
 		&i.Environment,
 		&i.SuspendedAt,
 		&i.SuspendedReason,
+		&i.SuspensionSource,
 	)
 	return i, err
 }
 
 const getTenantByAPIKey = `-- name: GetTenantByAPIKey :one
-SELECT id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after, environment, suspended_at, suspended_reason FROM tenants WHERE api_key = $1 AND disabled_at IS NULL AND suspended_at IS NULL
+SELECT id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after, environment, suspended_at, suspended_reason, suspension_source FROM tenants WHERE api_key = $1 AND disabled_at IS NULL AND suspended_at IS NULL
 `
 
 // A key works only while its tenant is neither switched off (by its owner) nor suspended (by the platform admin).
@@ -88,12 +89,13 @@ func (q *Queries) GetTenantByAPIKey(ctx context.Context, apiKey string) (Tenant,
 		&i.Environment,
 		&i.SuspendedAt,
 		&i.SuspendedReason,
+		&i.SuspensionSource,
 	)
 	return i, err
 }
 
 const getTenantByID = `-- name: GetTenantByID :one
-SELECT id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after, environment, suspended_at, suspended_reason FROM tenants WHERE id = $1
+SELECT id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after, environment, suspended_at, suspended_reason, suspension_source FROM tenants WHERE id = $1
 `
 
 func (q *Queries) GetTenantByID(ctx context.Context, id uuid.UUID) (Tenant, error) {
@@ -117,12 +119,13 @@ func (q *Queries) GetTenantByID(ctx context.Context, id uuid.UUID) (Tenant, erro
 		&i.Environment,
 		&i.SuspendedAt,
 		&i.SuspendedReason,
+		&i.SuspensionSource,
 	)
 	return i, err
 }
 
 const getTenantBySlug = `-- name: GetTenantBySlug :one
-SELECT id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after, environment, suspended_at, suspended_reason FROM tenants WHERE slug = $1
+SELECT id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after, environment, suspended_at, suspended_reason, suspension_source FROM tenants WHERE slug = $1
 `
 
 func (q *Queries) GetTenantBySlug(ctx context.Context, slug string) (Tenant, error) {
@@ -146,12 +149,40 @@ func (q *Queries) GetTenantBySlug(ctx context.Context, slug string) (Tenant, err
 		&i.Environment,
 		&i.SuspendedAt,
 		&i.SuspendedReason,
+		&i.SuspensionSource,
 	)
 	return i, err
 }
 
+const liftAccountSuspensionsOfTenants = `-- name: LiftAccountSuspensionsOfTenants :many
+UPDATE tenants SET suspended_at = NULL, suspended_reason = NULL, suspension_source = NULL
+WHERE account_id = $1 AND suspension_source = 'account'
+RETURNING id
+`
+
+// Lifts only what the account caused; a suspension the admin put on a project stays.
+func (q *Queries) LiftAccountSuspensionsOfTenants(ctx context.Context, accountID uuid.NullUUID) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, liftAccountSuspensionsOfTenants, accountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []uuid.UUID{}
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listTenants = `-- name: ListTenants :many
-SELECT id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after, environment, suspended_at, suspended_reason FROM tenants ORDER BY created_at
+SELECT id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after, environment, suspended_at, suspended_reason, suspension_source FROM tenants ORDER BY created_at
 `
 
 func (q *Queries) ListTenants(ctx context.Context) ([]Tenant, error) {
@@ -181,6 +212,7 @@ func (q *Queries) ListTenants(ctx context.Context) ([]Tenant, error) {
 			&i.Environment,
 			&i.SuspendedAt,
 			&i.SuspendedReason,
+			&i.SuspensionSource,
 		); err != nil {
 			return nil, err
 		}
@@ -212,7 +244,7 @@ func (q *Queries) SetTenantDisabled(ctx context.Context, arg SetTenantDisabledPa
 }
 
 const setTenantEnvironment = `-- name: SetTenantEnvironment :one
-UPDATE tenants SET environment = $1::text WHERE id = $2 RETURNING id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after, environment, suspended_at, suspended_reason
+UPDATE tenants SET environment = $1::text WHERE id = $2 RETURNING id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after, environment, suspended_at, suspended_reason, suspension_source
 `
 
 type SetTenantEnvironmentParams struct {
@@ -241,6 +273,7 @@ func (q *Queries) SetTenantEnvironment(ctx context.Context, arg SetTenantEnviron
 		&i.Environment,
 		&i.SuspendedAt,
 		&i.SuspendedReason,
+		&i.SuspensionSource,
 	)
 	return i, err
 }
@@ -248,9 +281,10 @@ func (q *Queries) SetTenantEnvironment(ctx context.Context, arg SetTenantEnviron
 const setTenantSuspended = `-- name: SetTenantSuspended :one
 UPDATE tenants
 SET suspended_at = CASE WHEN $1::boolean THEN coalesce(suspended_at, now()) ELSE NULL END,
-    suspended_reason = CASE WHEN $1::boolean THEN $2::text ELSE NULL END
+    suspended_reason = CASE WHEN $1::boolean THEN $2::text ELSE NULL END,
+    suspension_source = CASE WHEN $1::boolean THEN 'project' ELSE NULL END
 WHERE id = $3
-RETURNING id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after, environment, suspended_at, suspended_reason
+RETURNING id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after, environment, suspended_at, suspended_reason, suspension_source
 `
 
 type SetTenantSuspendedParams struct {
@@ -259,6 +293,7 @@ type SetTenantSuspendedParams struct {
 	ID        uuid.UUID
 }
 
+// A suspension of the project itself (the platform admin, source 'project').
 func (q *Queries) SetTenantSuspended(ctx context.Context, arg SetTenantSuspendedParams) (Tenant, error) {
 	row := q.db.QueryRow(ctx, setTenantSuspended, arg.Suspended, arg.Reason, arg.ID)
 	var i Tenant
@@ -280,8 +315,41 @@ func (q *Queries) SetTenantSuspended(ctx context.Context, arg SetTenantSuspended
 		&i.Environment,
 		&i.SuspendedAt,
 		&i.SuspendedReason,
+		&i.SuspensionSource,
 	)
 	return i, err
+}
+
+const suspendTenantsOfAccount = `-- name: SuspendTenantsOfAccount :many
+UPDATE tenants SET suspended_at = now(), suspended_reason = $1::text, suspension_source = 'account'
+WHERE account_id = $2::uuid AND suspended_at IS NULL
+RETURNING id
+`
+
+type SuspendTenantsOfAccountParams struct {
+	Reason    string
+	AccountID uuid.UUID
+}
+
+// The projects of an account that is suspended or being deleted. Those already suspended keep their own reason.
+func (q *Queries) SuspendTenantsOfAccount(ctx context.Context, arg SuspendTenantsOfAccountParams) ([]uuid.UUID, error) {
+	rows, err := q.db.Query(ctx, suspendTenantsOfAccount, arg.Reason, arg.AccountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []uuid.UUID{}
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const updateTenantConfig = `-- name: UpdateTenantConfig :execrows

@@ -105,6 +105,9 @@ func (s *Service) AdminUnsuspendProject(ctx context.Context, p Principal, id uui
 	if row.SuspendedAt == nil {
 		return row, nil
 	}
+	if row.SuspensionSource != nil && *row.SuspensionSource == "account" {
+		return store.Tenant{}, httpx.NewError(409, CodeProjectSuspended, "this project is stopped with its account: lift the account's suspension or restore the account")
+	}
 	if err := s.tenants.SetSuspended(ctx, row.ID, false, ""); err != nil {
 		return store.Tenant{}, err
 	}

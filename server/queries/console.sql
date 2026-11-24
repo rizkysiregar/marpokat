@@ -28,6 +28,38 @@ RETURNING *;
 UPDATE accounts SET is_platform_admin = sqlc.arg(admin)::boolean WHERE lower(email) = lower(sqlc.arg(email)) RETURNING id;
 
 -- Accounts in id order, optionally only those whose e-mail or name contains the search (an ILIKE pattern, escaped).
+-- name: SetAccountSuspended :one
+UPDATE accounts
+SET disabled_at = CASE WHEN sqlc.arg(suspended)::boolean THEN coalesce(disabled_at, now()) ELSE NULL END,
+    suspended_reason = CASE WHEN sqlc.arg(suspended)::boolean THEN sqlc.narg(reason)::text ELSE NULL END
+WHERE id = sqlc.arg(id)
+RETURNING *;
+
+-- An account to delete; one already scheduled keeps its date.
+-- name: ScheduleAccountDeletion :one
+UPDATE accounts SET delete_after = coalesce(delete_after, sqlc.arg(delete_after)::timestamptz) WHERE id = sqlc.arg(id) RETURNING *;
+
+-- name: SetAccountDeleteNow :one
+UPDATE accounts SET delete_after = now() WHERE id = $1 RETURNING *;
+
+-- name: CancelAccountDeletion :one
+UPDATE accounts SET delete_after = NULL WHERE id = $1 RETURNING *;
+
+-- The next account whose grace period is over, locked so that two workers never purge the same one.
+-- name: LockDueAccountDeletion :one
+SELECT id, email FROM accounts
+WHERE delete_after IS NOT NULL AND delete_after <= now()
+ORDER BY delete_after
+LIMIT 1
+FOR UPDATE SKIP LOCKED;
+
+-- name: ListTenantIDsOfAccount :many
+SELECT id, slug FROM tenants WHERE account_id = $1;
+
+-- Sessions, tokens and the security log go with it (ON DELETE CASCADE).
+-- name: DeleteAccountRow :exec
+DELETE FROM accounts WHERE id = $1;
+
 -- name: ListAccounts :many
 SELECT * FROM accounts
 WHERE id > sqlc.arg(after)::uuid

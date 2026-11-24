@@ -71,3 +71,39 @@ func projectDeletedByAdminMessage(to, name, project, when string) Message {
 		HTML:    fmt.Sprintf(`<p>Hi %s,</p><p>We deleted your project <strong>%s</strong>. It is switched off, and it is removed for good with its users, conversations, messages and files %s.</p><p>If you think this is a mistake, reply to this e-mail.</p>`, html.EscapeString(name), html.EscapeString(project), html.EscapeString(when)),
 	}
 }
+
+func accountSuspendedMessage(to, name, reason string) Message {
+	return Message{
+		To:      to,
+		Subject: "Your Marpokat account is suspended",
+		Text:    fmt.Sprintf("Hi %s,\n\nWe suspended your Marpokat account. You cannot sign in, and your projects cannot be used, until the suspension is lifted. Nothing was deleted.\n\nReason: %s\n\nIf you think this is a mistake, reply to this e-mail.\n", name, reason),
+		HTML:    fmt.Sprintf(`<p>Hi %s,</p><p>We suspended your Marpokat account. You cannot sign in, and your projects cannot be used, until the suspension is lifted. Nothing was deleted.</p><p>Reason: %s</p><p>If you think this is a mistake, reply to this e-mail.</p>`, html.EscapeString(name), html.EscapeString(reason)),
+	}
+}
+
+func accountUnsuspendedMessage(to, name, signIn string) Message {
+	return Message{
+		To:      to,
+		Subject: "Your Marpokat account is no longer suspended",
+		Text:    fmt.Sprintf("Hi %s,\n\nThe suspension of your Marpokat account is lifted. You can sign in again: %s\n", name, signIn),
+		HTML:    fmt.Sprintf(`<p>Hi %s,</p><p>The suspension of your Marpokat account is lifted. <a href="%s">Sign in</a></p>`, html.EscapeString(name), html.EscapeString(signIn)),
+	}
+}
+
+func accountDeletionScheduledMessage(to, name, when, signIn string) Message {
+	return Message{
+		To:      to,
+		Subject: "Your Marpokat account will be deleted",
+		Text:    fmt.Sprintf("Hi %s,\n\nAs you asked, your Marpokat account and all its projects (users, conversations, messages, files) are removed for good %s. Your projects are stopped already.\n\nChanged your mind? Sign in before then and restore it: %s\n", name, when, signIn),
+		HTML:    fmt.Sprintf(`<p>Hi %s,</p><p>As you asked, your Marpokat account and all its projects (users, conversations, messages, files) are removed for good %s. Your projects are stopped already.</p><p>Changed your mind? <a href="%s">Sign in</a> before then and restore it.</p>`, html.EscapeString(name), html.EscapeString(when), html.EscapeString(signIn)),
+	}
+}
+
+func accountDeletedByAdminMessage(to, name, when string) Message {
+	return Message{
+		To:      to,
+		Subject: "Your Marpokat account is deleted",
+		Text:    fmt.Sprintf("Hi %s,\n\nWe deleted your Marpokat account. It and all its projects (users, conversations, messages, files) are removed for good %s.\n\nIf you think this is a mistake, reply to this e-mail.\n", name, when),
+		HTML:    fmt.Sprintf(`<p>Hi %s,</p><p>We deleted your Marpokat account. It and all its projects (users, conversations, messages, files) are removed for good %s.</p><p>If you think this is a mistake, reply to this e-mail.</p>`, html.EscapeString(name), html.EscapeString(when)),
+	}
+}

@@ -80,6 +80,12 @@ func (s *Service) WithNotifier(n Notifier) *Service {
 	return s
 }
 
+// Announce tells the running pods a tenant changed (for changes made outside this service, e.g. the projects of a
+// suspended account). Best effort, like every announcement.
+func (s *Service) Announce(ctx context.Context, id uuid.UUID, disabled bool) {
+	s.announce(ctx, id, disabled)
+}
+
 // announce is best effort: the change is stored, and the cache TTL is the fallback when Redis cannot be reached.
 func (s *Service) announce(ctx context.Context, id uuid.UUID, disabled bool) {
 	if s.notify != nil {
