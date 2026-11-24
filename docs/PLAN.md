@@ -112,10 +112,10 @@ Legenda: ⚪ belum, 🟡 berjalan, ✅ selesai, ⛔ terblokir
 | D68 | **Website = dua aplikasi Vue yang murni frontend** (file statis, tanpa server Node/PHP, tanpa logika bisnis): **portal** untuk pengguna (landing, docs, getting started, daftar/masuk, proyek, akun) dan **admin** untuk internal (akun, proyek, statistik, audit). Repo `marpokat-web` menjadi monorepo pnpm dengan `apps/portal`, `apps/admin`, `packages/console-client`, `packages/theme`. Laravel dihentikan | Semua aturan bisnis, validasi otoritatif, captcha, dan limit ada di Go; frontend hanya tampilan, jadi mudah diganti dan murah di-host (nginx statis, read-only). Admin terpisah agar bisa dikunci dan di-deploy sendiri |
 | D69 | **Console API dibuka ke browser lewat path yang sama dengan app-nya** (same-origin): Ingress tiap host web merutekan `/console/v1/*` ke Service `marpokat-console`, sisanya ke file statis app. Tanpa CORS. `X-Console-Key` dan `X-Client-IP` dihapus (Laravel tidak pernah menyala di dev, jadi tanpa masa transisi) | Same-origin berarti cookie `SameSite=Strict` bekerja dan tidak perlu membuka CORS ke origin lain |
 | D70 | **Sesi browser = cookie `__Host-mp_session`** (`HttpOnly`, `Secure`, `SameSite=Strict`, `Path=/`) yang di-set Go saat `login` dan dihapus saat `logout`; token tidak pernah terlihat JavaScript. Perlindungan CSRF: setiap request yang mengubah data wajib membawa `Origin` portal (origin `CONSOLE_BASE_URL` + `CONSOLE_ALLOWED_ORIGINS`) atau admin (`CONSOLE_ADMIN_ORIGINS`) dan, bila ber-body, `Content-Type: application/json`. Semua jawaban `Cache-Control: no-store` | Token di `localStorage` bisa dicuri XSS; cookie `HttpOnly` tidak. SameSite + cek Origin menutup CSRF tanpa token tambahan |
-| D71 | **Sesi punya scope `portal` atau `admin`** (kolom `console_sessions.scope`, migrasi 00005), ditentukan dari `Origin` saat login. Login dari origin admin (`CONSOLE_ADMIN_ORIGINS`) hanya untuk platform admin (selain itu 403, tanpa sesi). Endpoint `/admin/*` butuh sesi admin; sesi portal milik admin dijawab 403. Cookie host-only, jadi sesi portal dan admin terpisah. Host admin dijaga juga oleh Cloudflare Access. Promosi admin tetap hanya CLI (D66) | Diikat ke sesi, bukan ke header saat dipakai: sesi portal admin yang bocor tidak cukup untuk mengelola platform. Admin punya lapisan login kedua di Cloudflare |
+| D71 | **Sesi punya scope `portal` atau `admin`** (kolom `console_sessions.scope`, migrasi 00005), ditentukan dari `Origin` saat login. Login dari origin admin (`CONSOLE_ADMIN_ORIGINS`) hanya untuk platform admin (selain itu 403, tanpa sesi). Endpoint `/admin/*` butuh sesi admin; sesi portal milik admin dijawab 403. Cookie host-only, jadi sesi portal dan admin terpisah. Host admin **publik seperti web biasa** (tanpa VPN atau Cloudflare Access, keputusan 2026-11-24): yang menjaga adalah server. Promosi admin tetap hanya CLI (D66) | Diikat ke sesi, bukan ke header saat dipakai: sesi portal admin yang bocor tidak cukup untuk mengelola platform |
 | D72 | **Turnstile diverifikasi Go** di `register` dan `forgot-password` (`TURNSTILE_SECRET_KEY`; `400 captcha_failed`, `503 captcha_unavailable` karena gagal tertutup bila Cloudflare tak terjangkau; mati bila kosong untuk pengembangan). Dicek setelah validasi input dan limit, supaya salah ketik tidak menghabiskan token dan banjir request tidak diteruskan ke Cloudflare. Frontend hanya menampilkan widget dan mengirim `turnstile_token` | Secret captcha tidak boleh di browser; robot yang memanggil API langsung tetap terhalang |
 | D73 | **Alamat pengunjung dibaca Go dari `CF-Connecting-IP`** hanya bila request datang dari proxy tepercaya (`CONSOLE_TRUSTED_PROXIES`, CIDR ingress; default rentang privat cluster), selain itu dari alamat koneksi. `X-Client-IP` dihapus bersama service key | Limit login/daftar dan audit tetap melihat orangnya, dan header tidak bisa dipalsukan dari luar |
-| D74 | **Stack website**: Vue 3 + TypeScript + Vite. Portal pakai **Nuxt 4 mode statis** (`nuxt generate`: landing dan docs di-prerender untuk SEO, `/app/**` hanya di browser), Tailwind 4 + tema Marpokat (`--mp-*`), komponen headless Reka UI, docs ditulis Markdown (Nuxt Content). Admin pakai **Quasar** (SPA, komponen tabel/form/dialog lengkap) dengan warna brand dari token Marpokat, tanpa Tailwind. Bersama: client bertipe dari `spec/console.yaml` (`openapi-typescript` + `openapi-fetch`), TanStack Query untuk data server, Pinia untuk sesi, VeeValidate + Zod untuk form (validasi di browser hanya kenyamanan, Go tetap penentu), Vitest + Playwright | Portal butuh SEO dan tampilan khas brand; admin butuh banyak tabel dan form cepat. Dua sistem styling tidak dicampur dalam satu app. Client yang di-generate dari spec membuat perubahan kontrak ketahuan saat compile |
+| D74 | **Stack website**: Vue 3 + TypeScript + Vite. Portal pakai **Nuxt 4 mode statis** (`nuxt generate`: landing dan docs di-prerender untuk SEO, `/app/**` hanya di browser), Tailwind 4 + tema Marpokat (`--mp-*`), docs ditulis Markdown (Nuxt Content); Reka UI ditambah saat komponen headless pertama dibutuhkan. Admin pakai **Quasar** (SPA, komponen tabel/form/dialog lengkap) dengan warna brand dari token Marpokat, tanpa Tailwind. Bersama: client bertipe dari `spec/console.yaml` (`openapi-typescript` + `openapi-fetch`), TanStack Query untuk data server, Pinia untuk sesi, Zod + composable kecil `useForm` untuk form (validasi di browser hanya kenyamanan, Go tetap penentu; VeeValidate batal karena adapter Zod-nya masih Zod 3), Vitest; Playwright menyusul. Node 24, TypeScript 5.9 (vue-tsc belum mendukung TS 7) | Portal butuh SEO dan tampilan khas brand; admin butuh banyak tabel dan form cepat. Dua sistem styling tidak dicampur dalam satu app. Client yang di-generate dari spec membuat perubahan kontrak ketahuan saat compile |
 
 ---
 
@@ -160,11 +160,11 @@ supaya prepared statement tidak bentrok antar koneksi.
 | ------------------- | --------------------------------------------------------------------------------------------------------- |
 | Monorepo            | pnpm workspaces: `apps/portal`, `apps/admin`, `packages/console-client`, `packages/theme`                 |
 | Bahasa / build      | TypeScript strict, Vue 3 (Composition API, `<script setup>`), Vite                                        |
-| Portal              | Nuxt 4 mode statis (`nuxt generate`), Nuxt Content (docs Markdown), Tailwind 4, Reka UI, tema `--mp-*`    |
+| Portal              | Nuxt 4 mode statis (`nuxt generate`), Nuxt Content (docs Markdown), Tailwind 4, tema `--mp-*`             |
 | Admin               | Quasar 2 (SPA, Vite), brand dari token Marpokat, tanpa Tailwind                                           |
 | Data / state        | `openapi-fetch` + tipe dari `spec/console.yaml` (`openapi-typescript`), TanStack Query (Vue), Pinia       |
-| Form                | VeeValidate + Zod (hanya kenyamanan; Go yang menentukan)                                                  |
-| Tes                 | Vitest (unit, komponen), Playwright (alur daftar → proyek terhadap API palsu/MSW), uji kontras tema WCAG  |
+| Form                | Zod 4 + `useForm` (error field dari API ditampilkan di field-nya; hanya kenyamanan, Go yang menentukan)  |
+| Tes                 | Vitest (unit), uji kontras tema WCAG; e2e Playwright di CI menyusul                                       |
 | Kualitas            | ESLint (flat config) + Prettier, `vue-tsc`                                                                |
 | Runtime             | Image nginx-unprivileged berisi file statis, read-only, UID 10001; header keamanan dan CSP di config nginx |
 
@@ -214,7 +214,7 @@ supaya prepared statement tidak bentrok antar koneksi.
 Website (D68–D73): dua host, masing-masing satu Ingress dengan dua path. Browser hanya bicara ke origin-nya sendiri.
 
 ```
- marpokat.rizkysiregar.my.id (portal)        admin-marpokat.rizkysiregar.my.id (admin, + Cloudflare Access)
+ marpokat.rizkysiregar.my.id (portal)        admin-marpokat.rizkysiregar.my.id (admin, publik)       
    /            → portal (nginx, file statis)   /            → admin (nginx, file statis)
    /console/v1  ─┐                              /console/v1  ─┐
                  └──────────────┬───────────────────────────────┘
@@ -600,21 +600,24 @@ Semua data dan aturan lewat Console API, yang dibuka ke browser secara same-orig
 
 **Frontend (repo `marpokat-web`, D74):**
 
-- [ ] Monorepo pnpm: `apps/portal`, `apps/admin`, `packages/console-client` (generate dari `spec/console.yaml`), `packages/theme` (port `marpokat-theme.css` + uji kontras)
-- [ ] Portal: landing, Terms, Privacy, docs (getting started, membuat proyek, alur token, server API, SDK JS/Android, push)
-- [ ] Portal: daftar (Turnstile), masuk, lupa/reset password, konfirmasi e-mail, kirim ulang verifikasi
-- [ ] Portal: proyek (buat, detail, secret tampil sekali, rotasi, kredensial push, pengaturan, matikan), akun (profil, password, sesi, audit)
-- [ ] Admin: masuk, statistik, daftar akun (cari, nonaktifkan), daftar proyek (cari, nonaktifkan), audit
-- [ ] Image nginx statis per app (read-only, UID 10001, CSP ketat tanpa `unsafe-inline`, `frame-ancestors 'none'`, `index.html` `no-store`, aset ber-hash cache panjang)
-- [ ] Tes: Vitest + Playwright terhadap API palsu (MSW) untuk alur utama portal dan admin
-- [ ] Jenkinsfile (lint, typecheck, test, build dua image `marpokat-portal` dan `marpokat-admin`)
+- [x] Monorepo pnpm: `apps/portal`, `apps/admin`, `packages/console-client` (generate dari `spec/console.yaml`), `packages/theme` (port `marpokat-theme.css` + uji kontras) (marpokat-web#3)
+- [x] Portal: landing, Terms, Privacy (draft), docs (getting started, push, batas). Docs lanjutan (server API, SDK JS/Android lebih rinci) menyusul
+- [x] Portal: daftar (Turnstile), masuk, lupa/reset password, konfirmasi e-mail, kirim ulang verifikasi
+- [ ] Portal: proyek (buat dan daftar selesai, secret tampil sekali; sisa: detail, rotasi, kredensial push, pengaturan, matikan), akun (profil, password, sesi, audit)
+- [ ] Admin: masuk, statistik, daftar akun (paging, nonaktifkan), daftar proyek (cari, nonaktifkan) selesai; sisa: audit
+- [x] Image nginx statis per app (UID 10001, read-only, CSP tanpa `unsafe-inline` dengan hash yang dihitung saat build, `frame-ancestors 'none'`, halaman `no-cache`, `config.json` `no-store`, aset ber-hash cache 1 tahun, `/healthz`)
+- [x] Tes: Vitest (69 tes), ESLint + Prettier + type check di image `test`; e2e di Chrome headless terhadap container dan Console API lokal (18 langkah, tanpa error console/CSP), dijalankan manual
+- [ ] Playwright di CI untuk alur utama portal dan admin
+- [x] Jenkinsfile (lint, typecheck, test, build dua image `marpokat-portal` dan `marpokat-admin`, tulis tag keduanya ke gitops)
+- [ ] Menutup pendaftaran (dulu `REGISTRATION_OPEN` di Laravel, hanya di frontend): jadi saklar di server (`CONSOLE_REGISTRATION_OPEN`), portal membaca statusnya
 
 **Gitops dan dev:**
 
-- [ ] `apps/marpokat-web-dev` ditulis ulang: deployment portal + admin, Ingress host portal dan admin dengan path `/console/v1` → `marpokat-console` (D69)
-- [ ] Configmap Go: `CONSOLE_ADMIN_ORIGINS` (dan `CONSOLE_ALLOWED_ORIGINS` bila perlu; `CONSOLE_ADDR`, `CONSOLE_BASE_URL` sudah ada); secret `TURNSTILE_SECRET_KEY`, `MAIL_*`; `CONSOLE_SERVICE_KEY` dihapus dari secret
-- [ ] Cloudflare Tunnel host dev (portal `app-dev-marpokat`, admin `admin-dev-marpokat`) + Cloudflare Access untuk host admin, Argo app, pipeline Jenkins
-- [ ] **Selesai jika:** orang bisa mendaftar di portal, membuat proyek, mendapat API key dan secret, dan memakainya di aplikasi; admin bisa melihat dan menonaktifkan akun/proyek dari host admin, dan host admin tidak bisa dibuka tanpa Cloudflare Access
+- [x] `apps/marpokat-web-dev` ditulis ulang: deployment portal + admin, `config.json` dari ConfigMap, Ingress host portal dan admin dengan path `/console/v1` → `marpokat-console` (D69) (homelabs-gitops#18)
+- [x] Configmap Go: `CONSOLE_ADMIN_ORIGINS` (homelabs-gitops#18)
+- [ ] Secret `TURNSTILE_SECRET_KEY` + site key di `portal-config.json`, `MAIL_*`; `CONSOLE_SERVICE_KEY` dan `marpokat-web-secrets` dihapus
+- [ ] Cloudflare Tunnel host dev (portal `app-dev-marpokat`, admin `admin-dev-marpokat`), Argo app, pipeline Jenkins `marpokat-web`, akses GHCR package `marpokat-portal` dan `marpokat-admin`
+- [ ] **Selesai jika:** orang bisa mendaftar di portal, membuat proyek, mendapat API key dan secret, dan memakainya di aplikasi; admin bisa melihat dan menonaktifkan akun/proyek dari host admin, dan hanya platform admin yang bisa masuk ke sana
 
 ### M8: Hardening dan launch prod 🟡
 
@@ -679,3 +682,4 @@ kemungkinan untuk semuanya.
 | 2026-11-22 | M3 selesai: diuji lewat wss di dev. M4 dikerjakan: D47–D53, relay outbox, RabbitMQ, push FCM, perangkat |
 | 2026-11-23 | Pengembangan MVP ditutup: chat diuji di Narrativ web + Android dev. M8: manifest prod `apps/marpokat` disiapkan |
 | 2026-11-24 | M9 diubah: Laravel dihentikan, website menjadi dua app Vue murni frontend (portal + admin). D62/D63 diganti, D68–D74 ditambahkan, stack website di bagian 3, diagram website di bagian 4, tugas M9 ditulis ulang. Console API untuk browser selesai di Go (cookie, Origin, scope admin, Turnstile, IP) |
+| 2026-11-24 | M9: gitops portal + admin (homelabs-gitops#18), monorepo Vue (marpokat-web#3). D71: host admin publik tanpa Cloudflare Access. D74: VeeValidate diganti `useForm` + Zod, Reka UI dan Playwright menyusul, Node 24 / TS 5.9 |
