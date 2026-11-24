@@ -106,6 +106,10 @@ SET delete_after = coalesce(delete_after, sqlc.arg(delete_after)::timestamptz), 
 WHERE id = sqlc.arg(id)
 RETURNING *;
 
+-- The platform admin's "delete now": the date is moved to now even when the project was already scheduled.
+-- name: SetTenantDeleteNow :one
+UPDATE tenants SET delete_after = now(), disabled_at = coalesce(disabled_at, now()) WHERE id = $1 RETURNING *;
+
 -- Restoring keeps the project switched off: the owner switches it on when ready.
 -- name: CancelTenantDeletion :one
 UPDATE tenants SET delete_after = NULL WHERE id = $1 RETURNING *;

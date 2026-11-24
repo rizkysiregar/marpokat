@@ -71,6 +71,7 @@ type Querier interface {
 	GetMessageByID(ctx context.Context, arg GetMessageByIDParams) (MessageDetail, error)
 	GetMessageBySeq(ctx context.Context, arg GetMessageBySeqParams) (MessageDetail, error)
 	GetSessionByHash(ctx context.Context, tokenHash []byte) (ConsoleSession, error)
+	// A key works only while its tenant is neither switched off (by its owner) nor suspended (by the platform admin).
 	GetTenantByAPIKey(ctx context.Context, apiKey string) (Tenant, error)
 	GetTenantByID(ctx context.Context, id uuid.UUID) (Tenant, error)
 	GetTenantBySlug(ctx context.Context, slug string) (Tenant, error)
@@ -175,7 +176,11 @@ type Querier interface {
 	SetAttachmentStatus(ctx context.Context, arg SetAttachmentStatusParams) error
 	SetChannelFrozen(ctx context.Context, arg SetChannelFrozenParams) (int64, error)
 	SetMemberRole(ctx context.Context, arg SetMemberRoleParams) error
+	// The platform admin's "delete now": the date is moved to now even when the project was already scheduled.
+	SetTenantDeleteNow(ctx context.Context, id uuid.UUID) (Tenant, error)
 	SetTenantDisabled(ctx context.Context, arg SetTenantDisabledParams) (int64, error)
+	SetTenantEnvironment(ctx context.Context, arg SetTenantEnvironmentParams) (Tenant, error)
+	SetTenantSuspended(ctx context.Context, arg SetTenantSuspendedParams) (Tenant, error)
 	SoftDeleteChannel(ctx context.Context, arg SoftDeleteChannelParams) error
 	// Everything that changed after the cursor, oldest change first (PLAN D8).
 	SyncMessages(ctx context.Context, arg SyncMessagesParams) ([]MessageDetail, error)

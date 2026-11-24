@@ -254,8 +254,22 @@ func (s *Service) SetDisabled(ctx context.Context, slug string, disabled bool) e
 	return nil
 }
 
+// SetSuspended suspends or lifts the suspension of a tenant (the platform admin, PLAN D79). Like a switch off, the API
+// refuses its keys and its sockets close at once; unlike it, only the platform admin can lift it.
+func (s *Service) SetSuspended(ctx context.Context, id uuid.UUID, suspended bool, reason string) error {
+	var r *string
+	if suspended {
+		r = &reason
+	}
+	if _, err := s.q.SetTenantSuspended(ctx, store.SetTenantSuspendedParams{ID: id, Suspended: suspended, Reason: r}); err != nil {
+		return fmt.Errorf("tenant: set suspended: %w", err)
+	}
+	s.announce(ctx, id, suspended)
+	return nil
+}
+
 // FCMCredentials returns the decrypted Firebase service account of an enabled tenant, and false when the tenant has
-// none (it has not asked for push notifications) or is disabled.
+// none (it has not asked for push notifications), is switched off or suspended.
 func (s *Service) FCMCredentials(ctx context.Context, tenantID uuid.UUID) ([]byte, bool, error) {
 	row, err := s.q.GetTenantByID(ctx, tenantID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -264,7 +278,7 @@ func (s *Service) FCMCredentials(ctx context.Context, tenantID uuid.UUID) ([]byt
 	if err != nil {
 		return nil, false, fmt.Errorf("tenant: load: %w", err)
 	}
-	if row.DisabledAt != nil || len(row.FcmCredentialsEnc) == 0 {
+	if row.DisabledAt != nil || row.SuspendedAt != nil || len(row.FcmCredentialsEnc) == 0 {
 		return nil, false, nil
 	}
 	plain, err := s.box.Open(row.FcmCredentialsEnc, secretContext(row.ID, "fcm_credentials"))

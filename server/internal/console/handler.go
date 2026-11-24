@@ -107,6 +107,10 @@ func (h *Handler) Routes() http.Handler {
 	mux.Handle("POST "+v+"/admin/accounts/{account_id}/disable", authed(h.adminSetAccountDisabled))
 	mux.Handle("GET "+v+"/admin/projects", authed(h.adminProjects))
 	mux.Handle("GET "+v+"/admin/projects/{project_id}", authed(h.adminProject))
+	mux.Handle("POST "+v+"/admin/projects/{project_id}/suspend", authed(h.adminSuspendProject))
+	mux.Handle("POST "+v+"/admin/projects/{project_id}/unsuspend", authed(h.adminUnsuspendProject))
+	mux.Handle("POST "+v+"/admin/projects/{project_id}/delete", authed(h.adminDeleteProject))
+	mux.Handle("POST "+v+"/admin/projects/{project_id}/restore", authed(h.adminRestoreProject))
 	mux.Handle("POST "+v+"/admin/projects/{project_id}/disable", authed(h.adminSetProjectDisabled))
 	mux.Handle("GET "+v+"/admin/stats", authed(h.adminStats))
 	mux.Handle("GET "+v+"/admin/stats/series", authed(h.adminSeries))
@@ -244,6 +248,9 @@ type projectJSON struct {
 	ClientCanCreateGroup bool       `json:"client_can_create_group"`
 	PushConfigured       bool       `json:"push_configured"`
 	Disabled             bool       `json:"disabled"`
+	Environment          *string    `json:"environment"`
+	Suspended            bool       `json:"suspended"`
+	SuspendedReason      *string    `json:"suspended_reason"`
 	DeleteAfter          *time.Time `json:"delete_after"`
 	CreatedAt            time.Time  `json:"created_at"`
 }
@@ -253,7 +260,7 @@ func projectOf(t store.Tenant) projectJSON {
 	_ = json.Unmarshal([]byte(t.Config), &cfg)
 	return projectJSON{ID: t.ID, Slug: t.Slug, Name: t.Name, APIKey: t.ApiKey,
 		ClientCanCreateDM: cfg.ClientCanCreateDM, ClientCanCreateGroup: cfg.ClientCanCreateGroup,
-		PushConfigured: len(t.FcmCredentialsEnc) > 0, Disabled: t.DisabledAt != nil, DeleteAfter: t.DeleteAfter, CreatedAt: t.CreatedAt}
+		PushConfigured: len(t.FcmCredentialsEnc) > 0, Disabled: t.DisabledAt != nil, Environment: t.Environment, Suspended: t.SuspendedAt != nil, SuspendedReason: t.SuspendedReason, DeleteAfter: t.DeleteAfter, CreatedAt: t.CreatedAt}
 }
 
 type pushJSON struct {
@@ -455,11 +462,11 @@ func (h *Handler) listProjects(w http.ResponseWriter, r *http.Request, p Princip
 }
 
 func (h *Handler) createProject(w http.ResponseWriter, r *http.Request, p Principal) {
-	var in struct{ Name, Slug string }
+	var in struct{ Name, Slug, Environment string }
 	if !httpx.DecodeJSON(w, r, &in) {
 		return
 	}
-	res, err := h.svc.CreateProject(r.Context(), p, in.Name, in.Slug, h.caller(r))
+	res, err := h.svc.CreateProject(r.Context(), p, in.Name, in.Slug, in.Environment, h.caller(r))
 	if err != nil {
 		h.fail(w, r, err)
 		return
@@ -503,11 +510,12 @@ func (h *Handler) updateProject(w http.ResponseWriter, r *http.Request, p Princi
 		Name                 *string `json:"name"`
 		ClientCanCreateDM    *bool   `json:"client_can_create_dm"`
 		ClientCanCreateGroup *bool   `json:"client_can_create_group"`
+		Environment          *string `json:"environment"`
 	}
 	if !httpx.DecodeJSON(w, r, &in) {
 		return
 	}
-	row, err := h.svc.UpdateProject(r.Context(), p, id, ProjectUpdate{in.Name, in.ClientCanCreateDM, in.ClientCanCreateGroup}, h.caller(r))
+	row, err := h.svc.UpdateProject(r.Context(), p, id, ProjectUpdate{in.Name, in.ClientCanCreateDM, in.ClientCanCreateGroup, in.Environment}, h.caller(r))
 	if err != nil {
 		h.fail(w, r, err)
 		return
@@ -833,10 +841,11 @@ func (h *Handler) adminProject(w http.ResponseWriter, r *http.Request, p Princip
 		return
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{
-		"project":  adminProjectJSON{projectOf(v.Project), v.OwnerEmail},
-		"owner_id": v.Project.AccountID,
-		"usage":    map[string]int64{"users": v.Usage.Users, "channels": v.Usage.Channels, "messages": v.Usage.Messages},
-		"push":     pushOf(v.Push),
+		"project":        adminProjectJSON{projectOf(v.Project), v.OwnerEmail},
+		"owner_id":       v.Project.AccountID,
+		"owner_is_admin": v.OwnerIsAdmin,
+		"usage":          map[string]int64{"users": v.Usage.Users, "channels": v.Usage.Channels, "messages": v.Usage.Messages},
+		"push":           pushOf(v.Push),
 	})
 }
 
@@ -910,4 +919,56 @@ func (h *Handler) adminSeries(w http.ResponseWriter, r *http.Request, p Principa
 		ts[i] = top{t.ID, t.Name, t.Slug, t.Messages}
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"days": ds, "top_projects": ts})
+}
+
+// ---------------------------------------------------------------- platform admin: control over projects (PLAN D79)
+
+func (h *Handler) adminProjectAction(w http.ResponseWriter, r *http.Request, act func(uuid.UUID) (store.Tenant, error)) {
+	id, err := httpx.PathUUID(r, "project_id")
+	if err != nil {
+		h.fail(w, r, errProjectNotFound)
+		return
+	}
+	row, err := act(id)
+	if err != nil {
+		h.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, projectOf(row))
+}
+
+func (h *Handler) adminSuspendProject(w http.ResponseWriter, r *http.Request, p Principal) {
+	var in struct{ Reason string }
+	if !httpx.DecodeJSON(w, r, &in) {
+		return
+	}
+	h.adminProjectAction(w, r, func(id uuid.UUID) (store.Tenant, error) {
+		return h.svc.AdminSuspendProject(r.Context(), p, id, in.Reason, h.caller(r))
+	})
+}
+
+func (h *Handler) adminUnsuspendProject(w http.ResponseWriter, r *http.Request, p Principal) {
+	h.adminProjectAction(w, r, func(id uuid.UUID) (store.Tenant, error) {
+		return h.svc.AdminUnsuspendProject(r.Context(), p, id, h.caller(r))
+	})
+}
+
+func (h *Handler) adminDeleteProject(w http.ResponseWriter, r *http.Request, p Principal) {
+	var in struct {
+		Confirm  string
+		Password string
+		Now      bool
+	}
+	if !httpx.DecodeJSON(w, r, &in) {
+		return
+	}
+	h.adminProjectAction(w, r, func(id uuid.UUID) (store.Tenant, error) {
+		return h.svc.AdminDeleteProject(r.Context(), p, id, in.Confirm, in.Password, in.Now, h.caller(r))
+	})
+}
+
+func (h *Handler) adminRestoreProject(w http.ResponseWriter, r *http.Request, p Principal) {
+	h.adminProjectAction(w, r, func(id uuid.UUID) (store.Tenant, error) {
+		return h.svc.AdminRestoreProject(r.Context(), p, id, h.caller(r))
+	})
 }
