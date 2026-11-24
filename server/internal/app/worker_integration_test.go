@@ -134,6 +134,38 @@ func TestPushRemovesTokensFCMDoesNotKnow(t *testing.T) {
 	}
 }
 
+func TestPushKeepsTokensOfAnotherFirebaseProject(t *testing.T) {
+	drainOutbox(t)
+	e := newRealtimeEnv(t, 1, nil)
+	g := newFakeGoogle(t)
+	g.answer("other-project-phone", func(int) (int, string) {
+		return 403, `{"error":{"code":403,"status":"PERMISSION_DENIED","message":"SenderId mismatch","details":[{"errorCode":"SENDER_ID_MISMATCH"}]}}`
+	})
+	w := startWorker(t, g, nil)
+	tt := e.createTenant(tenant.Config{})
+	e.withFCM(tt, g)
+	e.seed(tt, "alice", "bob")
+	ch := e.dm(tt, "alice", "bob")
+	e.registerDevice(tt, "bob", "android", "other-project-phone")
+
+	e.mustSay(tt, "alice", ch, "one")
+	waitUntil(t, 10*time.Second, "the mismatch to be counted", func() bool {
+		return testutil.ToFloat64(w.metrics.PushFailed.WithLabelValues("project_mismatch")) >= 1
+	})
+	// a configuration error of the tenant: the device stays, so pushes work again once the credentials are fixed
+	if countWhere(t, `SELECT count(*) FROM devices WHERE tenant_id = $1 AND push_token = 'other-project-phone'`, tt.ID) != 1 {
+		t.Fatal("the device was removed for a configuration error of the tenant")
+	}
+	if got := testutil.ToFloat64(w.metrics.PushFailed.WithLabelValues("invalid_token")); got != 0 {
+		t.Errorf("invalid_token metric = %v, want 0", got)
+	}
+	// and the message is not retried
+	time.Sleep(500 * time.Millisecond)
+	if n := g.attempts("other-project-phone"); n != 1 {
+		t.Errorf("FCM was asked %d times, want once", n)
+	}
+}
+
 func TestPushRetriesWhatFailedAndOnlyThat(t *testing.T) {
 	drainOutbox(t)
 	e := newRealtimeEnv(t, 1, nil)
@@ -448,6 +480,14 @@ func TestDevices(t *testing.T) {
 	}
 	if owner("phone-00") != "" || owner("phone-11") != alice {
 		t.Fatal("the oldest tokens must be the ones that go")
+	}
+	// registering again counts as recent: a phone still in use is kept over one that was not seen since
+	time.Sleep(3 * time.Millisecond)
+	e.registerDevice(tt, "alice", "android", "phone-02")
+	time.Sleep(3 * time.Millisecond)
+	e.registerDevice(tt, "alice", "android", "phone-12")
+	if owner("phone-02") != alice || owner("phone-03") != "" {
+		t.Fatal("a token registered again was trimmed as if it were old")
 	}
 
 	// another tenant does not see them

@@ -23,6 +23,12 @@ import (
 // The device is removed.
 var ErrInvalidToken = errors.New("push: the device token is not valid")
 
+// ErrProjectMismatch: FCM says the token belongs to another Firebase project than the tenant's service account
+// (SENDER_ID_MISMATCH). That is a configuration error of the tenant (credentials of the wrong project, or of another
+// environment), not a dead token: the device is kept, so that fixing the credentials makes pushes work again, and the
+// message is not retried.
+var ErrProjectMismatch = errors.New("push: the token belongs to another Firebase project than the tenant's credentials")
+
 // SendError is a failure of FCM that is not about the token. Retryable ones (FCM overloaded, network, expired
 // authorisation) are worth another attempt later; the others (a request FCM refuses, unusable credentials) are not.
 type SendError struct {
@@ -207,7 +213,9 @@ func (f *FCM) Send(ctx context.Context, raw []byte, m Message) error {
 	_ = json.Unmarshal(raw1, &eb)
 	code := eb.errorCode()
 	switch {
-	case res.StatusCode == http.StatusNotFound, code == "UNREGISTERED", code == "SENDER_ID_MISMATCH":
+	case code == "SENDER_ID_MISMATCH":
+		return fmt.Errorf("%w (HTTP %d): %s", ErrProjectMismatch, res.StatusCode, summary(eb, raw1))
+	case res.StatusCode == http.StatusNotFound, code == "UNREGISTERED":
 		return fmt.Errorf("%w (%s)", ErrInvalidToken, code)
 	case res.StatusCode == http.StatusBadRequest && strings.Contains(strings.ToLower(eb.Error.Message), "registration token"):
 		return fmt.Errorf("%w (%s)", ErrInvalidToken, eb.Error.Message)

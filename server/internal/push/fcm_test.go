@@ -135,15 +135,16 @@ func TestFCMErrors(t *testing.T) {
 		body      string
 		invalid   bool
 		retryable bool
+		mismatch  bool
 	}{
-		{"unregistered", 404, `{"error":{"code":404,"status":"NOT_FOUND","message":"Requested entity was not found.","details":[{"errorCode":"UNREGISTERED"}]}}`, true, false},
-		{"unknown token", 400, `{"error":{"code":400,"status":"INVALID_ARGUMENT","message":"The registration token is not a valid FCM registration token"}}`, true, false},
-		{"token of another project", 403, `{"error":{"code":403,"status":"PERMISSION_DENIED","message":"SenderId mismatch","details":[{"errorCode":"SENDER_ID_MISMATCH"}]}}`, true, false},
-		{"bad request that is not the token", 400, `{"error":{"code":400,"status":"INVALID_ARGUMENT","message":"Data payload is too big"}}`, false, false},
-		{"quota", 429, `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"quota"}}`, false, true},
-		{"overloaded", 503, `{"error":{"code":503,"status":"UNAVAILABLE","message":"try later"}}`, false, true},
-		{"server error with no body", 500, ``, false, true},
-		{"authorisation", 401, `{"error":{"code":401,"status":"UNAUTHENTICATED","message":"expired"}}`, false, true},
+		{"unregistered", 404, `{"error":{"code":404,"status":"NOT_FOUND","message":"Requested entity was not found.","details":[{"errorCode":"UNREGISTERED"}]}}`, true, false, false},
+		{"unknown token", 400, `{"error":{"code":400,"status":"INVALID_ARGUMENT","message":"The registration token is not a valid FCM registration token"}}`, true, false, false},
+		{"token of another project", 403, `{"error":{"code":403,"status":"PERMISSION_DENIED","message":"SenderId mismatch","details":[{"errorCode":"SENDER_ID_MISMATCH"}]}}`, false, false, true},
+		{"bad request that is not the token", 400, `{"error":{"code":400,"status":"INVALID_ARGUMENT","message":"Data payload is too big"}}`, false, false, false},
+		{"quota", 429, `{"error":{"code":429,"status":"RESOURCE_EXHAUSTED","message":"quota"}}`, false, true, false},
+		{"overloaded", 503, `{"error":{"code":503,"status":"UNAVAILABLE","message":"try later"}}`, false, true, false},
+		{"server error with no body", 500, ``, false, true, false},
+		{"authorisation", 401, `{"error":{"code":401,"status":"UNAUTHENTICATED","message":"expired"}}`, false, true, false},
 	}
 	for _, c := range cases {
 		f := newFake(t)
@@ -151,6 +152,10 @@ func TestFCMErrors(t *testing.T) {
 		err := f.sender().Send(t.Context(), f.account(t), Message{Token: "t", Platform: "android", Data: map[string]string{}})
 		var se *SendError
 		switch {
+		case c.mismatch:
+			if !errors.Is(err, ErrProjectMismatch) || errors.Is(err, ErrInvalidToken) {
+				t.Errorf("%s: err = %v, want ErrProjectMismatch only", c.name, err)
+			}
 		case c.invalid:
 			if !errors.Is(err, ErrInvalidToken) {
 				t.Errorf("%s: err = %v, want ErrInvalidToken", c.name, err)

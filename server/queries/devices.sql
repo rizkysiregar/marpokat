@@ -1,8 +1,9 @@
 -- name: UpsertDevice :exec
--- A push token belongs to whoever registered it last (shared device, account switch).
+-- A push token belongs to whoever registered it last (shared device, account switch). updated_at is when it was last
+-- registered: apps register again on every session, so TrimDevicesOfUser keeps the phones still in use.
 INSERT INTO devices (tenant_id, push_token, user_id, platform)
 VALUES ($1, $2, $3, $4)
-ON CONFLICT (tenant_id, push_token) DO UPDATE SET user_id = EXCLUDED.user_id, platform = EXCLUDED.platform;
+ON CONFLICT (tenant_id, push_token) DO UPDATE SET user_id = EXCLUDED.user_id, platform = EXCLUDED.platform, updated_at = now();
 
 -- name: DeleteDeviceOfUser :execrows
 DELETE FROM devices WHERE tenant_id = $1 AND push_token = $2 AND user_id = $3;

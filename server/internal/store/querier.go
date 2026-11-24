@@ -215,7 +215,8 @@ type Querier interface {
 	UpdateTenantName(ctx context.Context, arg UpdateTenantNameParams) (int64, error)
 	UpdateTenantSecret(ctx context.Context, arg UpdateTenantSecretParams) (int64, error)
 	UpdateTenantWebhook(ctx context.Context, arg UpdateTenantWebhookParams) (int64, error)
-	// A push token belongs to whoever registered it last (shared device, account switch).
+	// A push token belongs to whoever registered it last (shared device, account switch). updated_at is when it was last
+	// registered: apps register again on every session, so TrimDevicesOfUser keeps the phones still in use.
 	UpsertDevice(ctx context.Context, arg UpsertDeviceParams) error
 	// Re-upserting a deleted user brings it back: the tenant decides who exists.
 	UpsertUser(ctx context.Context, arg UpsertUserParams) (User, error)
