@@ -97,6 +97,7 @@ type ConsoleSession struct {
 	AbsoluteExpiresAt time.Time
 	UserAgent         string
 	Ip                string
+	Scope             string
 }
 
 type Device struct {

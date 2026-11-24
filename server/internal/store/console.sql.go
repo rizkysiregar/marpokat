@@ -206,7 +206,7 @@ func (q *Queries) GetAccountByID(ctx context.Context, id uuid.UUID) (Account, er
 }
 
 const getSessionByHash = `-- name: GetSessionByHash :one
-SELECT id, account_id, token_hash, created_at, last_seen_at, expires_at, absolute_expires_at, user_agent, ip FROM console_sessions WHERE token_hash = $1 AND expires_at > now() AND absolute_expires_at > now()
+SELECT id, account_id, token_hash, created_at, last_seen_at, expires_at, absolute_expires_at, user_agent, ip, scope FROM console_sessions WHERE token_hash = $1 AND expires_at > now() AND absolute_expires_at > now()
 `
 
 func (q *Queries) GetSessionByHash(ctx context.Context, tokenHash []byte) (ConsoleSession, error) {
@@ -222,6 +222,7 @@ func (q *Queries) GetSessionByHash(ctx context.Context, tokenHash []byte) (Conso
 		&i.AbsoluteExpiresAt,
 		&i.UserAgent,
 		&i.Ip,
+		&i.Scope,
 	)
 	return i, err
 }
@@ -332,8 +333,8 @@ func (q *Queries) InsertAudit(ctx context.Context, arg InsertAuditParams) error 
 }
 
 const insertSession = `-- name: InsertSession :exec
-INSERT INTO console_sessions (id, account_id, token_hash, expires_at, absolute_expires_at, user_agent, ip)
-VALUES ($1, $2, $3, $4, $5, $6, $7)
+INSERT INTO console_sessions (id, account_id, token_hash, expires_at, absolute_expires_at, user_agent, ip, scope)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 `
 
 type InsertSessionParams struct {
@@ -344,6 +345,7 @@ type InsertSessionParams struct {
 	AbsoluteExpiresAt time.Time
 	UserAgent         string
 	Ip                string
+	Scope             string
 }
 
 func (q *Queries) InsertSession(ctx context.Context, arg InsertSessionParams) error {
@@ -355,12 +357,13 @@ func (q *Queries) InsertSession(ctx context.Context, arg InsertSessionParams) er
 		arg.AbsoluteExpiresAt,
 		arg.UserAgent,
 		arg.Ip,
+		arg.Scope,
 	)
 	return err
 }
 
 const listAccountSessions = `-- name: ListAccountSessions :many
-SELECT id, account_id, token_hash, created_at, last_seen_at, expires_at, absolute_expires_at, user_agent, ip FROM console_sessions
+SELECT id, account_id, token_hash, created_at, last_seen_at, expires_at, absolute_expires_at, user_agent, ip, scope FROM console_sessions
 WHERE account_id = $1 AND expires_at > now() AND absolute_expires_at > now()
 ORDER BY last_seen_at DESC
 `
@@ -384,6 +387,7 @@ func (q *Queries) ListAccountSessions(ctx context.Context, accountID uuid.UUID) 
 			&i.AbsoluteExpiresAt,
 			&i.UserAgent,
 			&i.Ip,
+			&i.Scope,
 		); err != nil {
 			return nil, err
 		}

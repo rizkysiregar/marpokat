@@ -49,8 +49,8 @@ RETURNING account_id;
 SELECT count(*) FROM account_tokens WHERE account_id = $1 AND kind = $2 AND created_at > $3;
 
 -- name: InsertSession :exec
-INSERT INTO console_sessions (id, account_id, token_hash, expires_at, absolute_expires_at, user_agent, ip)
-VALUES ($1, $2, $3, $4, $5, $6, $7);
+INSERT INTO console_sessions (id, account_id, token_hash, expires_at, absolute_expires_at, user_agent, ip, scope)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8);
 
 -- name: GetSessionByHash :one
 SELECT * FROM console_sessions WHERE token_hash = $1 AND expires_at > now() AND absolute_expires_at > now();
