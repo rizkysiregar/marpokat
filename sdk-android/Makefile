@@ -12,9 +12,10 @@ OWNER        ?= rizkysiregar
 GROUP        := com.rizkysiregar.marpokat
 ARTIFACTS    := marpokat-core marpokat-android
 VERSION      := $(shell sed -n 's/^ *version = "\(.*\)"/\1/p' build.gradle.kts)
-# a JDK 21 (the SDK's toolchain); JAVA_HOME in the environment wins
-JAVA_HOME    ?= $(shell /usr/libexec/java_home -v 21 2>/dev/null)
-export JAVA_HOME
+# Gradle 8.11 runs on a JDK 17 to 23, not on the 25 a shell may have as JAVA_HOME: always a JDK 21 (the SDK's
+# toolchain), found on macOS; another one with make ... JDK=/path/to/jdk-21
+JDK          ?= $(shell /usr/libexec/java_home -v 21 2>/dev/null)
+export JAVA_HOME := $(JDK)
 
 TOKEN = $(or $(GITHUB_PACKAGES_TOKEN),$(shell gh auth token 2>/dev/null))
 
@@ -27,16 +28,21 @@ help: ## list targets
 version: ## print the version that would be published
 	@echo $(VERSION)
 
+.PHONY: check-jdk
+check-jdk:
+	@test -x "$(JAVA_HOME)/bin/java" || { echo "no JDK 21 found: install one, or give it with make ... JDK=/path/to/jdk-21"; exit 1; }
+	@"$(JAVA_HOME)/bin/java" -version 2>&1 | head -1 | grep -q '"21' || { echo "$(JAVA_HOME) is not a JDK 21"; exit 1; }
+
 .PHONY: test
-test: ## unit tests (core and android)
+test: check-jdk ## unit tests (core and android)
 	./gradlew :core:test :android:testDebugUnitTest
 
 .PHONY: build
-build: ## build both artifacts (jar and release aar)
+build: check-jdk ## build both artifacts (jar and release aar)
 	./gradlew :core:assemble :android:assembleRelease
 
 .PHONY: local
-local: ## publish $(VERSION) to the local Maven repository (~/.m2)
+local: check-jdk ## publish $(VERSION) to the local Maven repository (~/.m2)
 	./gradlew publishToMavenLocal
 	@echo "published $(GROUP) $(VERSION) to ~/.m2: build the app with -Pmarpokat.local"
 

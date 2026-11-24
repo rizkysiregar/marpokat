@@ -55,7 +55,8 @@ make local       # to ~/.m2, for an app built with -Pmarpokat.local
 
 Raise `version` in the root `build.gradle.kts` first (a published version cannot be replaced). The token comes from
 `GITHUB_PACKAGES_TOKEN`, or the GitHub CLI (`gh auth refresh -s write:packages,read:packages` once); it needs
-`write:packages`. A JDK 21 is found by itself on macOS (`JAVA_HOME` wins).
+`write:packages`. It always runs on a JDK 21, found by itself on macOS even when `JAVA_HOME` is another one (Gradle 8.11 does not run
+on Java 25); give another with `make ... JDK=/path/to/jdk-21`.
 
 Apps read it with a Maven repository `https://maven.pkg.github.com/rizkysiregar/marpokat` and credentials
 (`read:packages`).
