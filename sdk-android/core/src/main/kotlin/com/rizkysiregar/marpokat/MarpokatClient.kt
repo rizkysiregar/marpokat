@@ -10,7 +10,10 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -72,6 +75,16 @@ public class MarpokatClient(private val options: MarpokatOptions) {
 
     private val _state = MutableStateFlow(ChatState())
     public val state: StateFlow<ChatState> = _state
+
+    private val _incoming = MutableSharedFlow<IncomingMessage>(extraBufferCapacity = 64, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+
+    /**
+     * Messages from other people as they arrive over the live connection, one event each: not your own, not system
+     * messages, not deleted ones, not what a sync or a page of history brings back, and never the same message twice.
+     * For an in-app banner or notification while the app is open (when it is closed, the server sends a push
+     * instead). Nothing is replayed to a collector that starts late; the conversations themselves are in [state].
+     */
+    public val incoming: SharedFlow<IncomingMessage> = _incoming
 
     // ---- everything below is touched only on `loop`
     private var status = ConnectionStatus.Idle
@@ -376,11 +389,18 @@ public class MarpokatClient(private val options: MarpokatOptions) {
 
     private fun receive(m: Message, isNew: Boolean = false) {
         if (channels[m.channelId] == null) {
-            scope.launch { runCatching { loadChannels() } }
+            // a conversation this client does not know yet (someone just started it): load it, then announce
+            scope.launch {
+                runCatching { loadChannels() }
+                if (isNew) announce(m)
+            }
             return
         }
         if (!revision(m.channelId, m.revSeq)) return
-        storeMessage(m.channelId, m)
+        // a channel that is not open has no cursor yet, so the same message can pass revision() twice: only the
+        // first copy that is stored is announced
+        val stored = storeMessage(m.channelId, m)
+        if (isNew && stored) announce(m)
         val state = channels.getValue(m.channelId)
         val mine = m.sender?.externalId == me?.externalId
         var channel = state.channel
@@ -392,6 +412,13 @@ public class MarpokatClient(private val options: MarpokatOptions) {
         if (m.channelId == current && !mine) markReadNow(m.channelId)
         publish()
         scope.launch { persistMessages(m.channelId) }
+    }
+
+    /** Tells [incoming] about a live message from someone else. */
+    private fun announce(m: Message) {
+        if (m.isSystem || m.isDeleted || m.sender?.externalId == me?.externalId) return
+        val channel = channels[m.channelId]?.channel ?: return
+        _incoming.tryEmit(IncomingMessage(m, channel, isOpen = m.channelId == current))
     }
 
     // ------------------------------------------------------------------ frames

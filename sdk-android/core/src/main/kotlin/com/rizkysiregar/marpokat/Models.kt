@@ -159,6 +159,18 @@ public data class ChatState(
 
 public data class UploadProgress(val loaded: Long, val total: Long)
 
+/**
+ * A message from someone else that just arrived over the live connection ([MarpokatClient.incoming]): what an app
+ * needs to show an in-app banner or a notification while it is open.
+ */
+public data class IncomingMessage(
+    val message: Message,
+    /** The conversation it belongs to (its name, or the other person of a direct message). */
+    val channel: Channel,
+    /** The conversation is open in this client right now ([MarpokatClient.openChannel]): no banner is needed. */
+    val isOpen: Boolean,
+)
+
 /** The server refused a call, or could not be reached (`status` 0). */
 public class MarpokatException(
     message: String,
