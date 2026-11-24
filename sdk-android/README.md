@@ -48,8 +48,14 @@ MP_URL=... MP_KEY=... MP_TOKEN_ALICE=... MP_TOKEN_BOB=... MP_CHANNEL=... ./gradl
 ## Publishing (GitHub Packages, Maven)
 
 ```bash
-./gradlew publishAllPublicationsToGitHubPackagesRepository -Pgpr.user=rizkysiregar -Pgpr.token=<PAT with write:packages>
+make help        # targets and the current version
+make publish     # refuses uncommitted changes and a version already published, runs the tests, then publishes
+make local       # to ~/.m2, for an app built with -Pmarpokat.local
 ```
 
+Raise `version` in the root `build.gradle.kts` first (a published version cannot be replaced). The token comes from
+`GITHUB_PACKAGES_TOKEN`, or the GitHub CLI (`gh auth refresh -s write:packages,read:packages` once); it needs
+`write:packages`. A JDK 21 is found by itself on macOS (`JAVA_HOME` wins).
+
 Apps read it with a Maven repository `https://maven.pkg.github.com/rizkysiregar/marpokat` and credentials
-(`read:packages`). The version is `version` in the root `build.gradle.kts`.
+(`read:packages`).
