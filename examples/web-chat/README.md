@@ -8,16 +8,18 @@ reconnecting with jitter, resending unacknowledged messages with the same `clien
 
 ```bash
 cd examples/web-chat
-python3 -m http.server 3000      # port 3000: the Narrativ dev API allows that origin for its sign in
+python3 -m http.server 3000
 ```
 
 Open <http://localhost:3000> in two browsers (or one normal and one private window), one per user.
 
-**With Narrativ dev:** open "Get a token from Narrativ", enter the Narrativ dev API
-(`https://api-dev-narrativ.rizkysiregar.my.id/api/v1`) and an account, press Sign in, then Connect. The page fills in
-the Marpokat URL, api key and token from `POST /chat/token`.
+**With a tenant backend that hands out tokens:** open "Get a token from your backend", enter its API address and an
+account, press Sign in, then Connect. The helper expects the shape of the reference integration:
+`POST <api>/auth/login {username, password}` answering `{data: {token}}`, then `POST <api>/chat/token` (with that
+token as bearer) answering `{data: {baseUrl, apiKey, token}}`. The backend must allow the origin
+`http://localhost:3000`.
 
-**Without Narrativ:** make the values yourself against any Marpokat:
+**Without a backend:** make the values yourself against any Marpokat:
 
 ```bash
 marpokat tenant token --slug my-app --user alice      # user token, valid 1 hour

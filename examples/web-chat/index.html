@@ -50,13 +50,13 @@
 </head>
 <body>
 <header>
-  <input id="base" class="grow" placeholder="Marpokat URL, e.g. https://api-dev-marpokat.rizkysiregar.my.id">
+  <input id="base" class="grow" placeholder="Marpokat URL, e.g. https://chat-api.example.com">
   <input id="key" placeholder="api key (mpk_...)" size="22">
   <input id="token" class="grow" placeholder="user token (JWT)">
   <button id="connect">Connect</button>
   <details style="border:0;max-height:none">
-    <summary>Get a token from Narrativ</summary>
-    <input id="nv" placeholder="Narrativ API, e.g. https://api-dev-narrativ.rizkysiregar.my.id/api/v1" size="40">
+    <summary>Get a token from your backend</summary>
+    <input id="nv" placeholder="Your backend API, e.g. https://api.example.com/api/v1" size="40">
     <input id="nvUser" placeholder="username"> <input id="nvPass" type="password" placeholder="password">
     <button id="nvGo" type="button">Sign in</button>
   </details>
@@ -230,7 +230,7 @@ $('form').onsubmit = (e) => {
 };
 $('text').oninput = () => { if (chat?.current) chat.typingStart(chat.current); };
 
-// ---------------------------------------------------------------- Narrativ helper: fills in key and token
+// ---------------------------------------------------------------- tenant backend helper: fills in key and token
 $('nvGo').onclick = async () => {
   try {
     const nv = $('nv').value.trim().replace(/\/+$/, ''); set('nv', nv); set('nvUser', $('nvUser').value);
@@ -240,7 +240,7 @@ $('nvGo').onclick = async () => {
     const t = await (await fetch(nv + '/chat/token', { method: 'POST', headers: { Authorization: 'Bearer ' + access } })).json();
     $('base').value = t.data.baseUrl; $('key').value = t.data.apiKey; $('token').value = t.data.token;
     $('status').textContent = 'token received: press Connect';
-  } catch (err) { $('status').textContent = 'Narrativ sign in failed: ' + err.message; }
+  } catch (err) { $('status').textContent = 'Sign in to your backend failed: ' + err.message; }
 };
 
 $('connect').onclick = connect;

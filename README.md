@@ -1,9 +1,13 @@
 # Marpokat
 
 Multi-tenant **chat as a service**: a Go backend (REST + WebSocket), SDKs for web and Android, and a protocol any
-app can integrate. Narrativ is the first tenant.
+app can integrate. Developers sign up on a website, create a project and get the keys for their app; the website is
+a separate repository (`marpokat-web`, two static Vue apps) that talks to this server's **Console API**.
 
-Plan, decisions and progress: [`docs/PLAN.md`](docs/PLAN.md) (the `D1`…`D58` numbers in code comments point there).
+Plan, decisions and progress: [`docs/PLAN.md`](docs/PLAN.md) (the `D<n>` numbers in code comments point there).
+
+Hosts, credentials and infrastructure addresses are not in this repository: they are settings (environment variables,
+Kubernetes secrets) of each deployment.
 
 This README explains how the whole system works, end to end, and how to read the code. If you come from Java and are
 new to Go, start with [Go for Java developers](#11-go-for-java-developers) and then follow
@@ -34,10 +38,11 @@ There are three parties:
 
 | Party | Example | What it does |
 | ----- | ------- | ------------ |
-| **Tenant** (a customer app) | Narrativ | Has its own users and its own backend. Wants chat without building it |
-| **Tenant backend** | Narrativ API | Tells Marpokat who the users are (`PUT /v1/server/users/{id}`), signs a **user token** (JWT) for each of them, and decides who may chat with whom (e.g. opens DMs) |
-| **App with the SDK** | Narrativ Android app, a web page | Asks its own backend for a token, then talks **directly** to Marpokat: WebSocket for live events, REST for the rest |
+| **Tenant** (a customer app, a "project" on the website) | a social app | Has its own users and its own backend. Wants chat without building it |
+| **Tenant backend** | the social app's API | Tells Marpokat who the users are (`PUT /v1/server/users/{id}`), signs a **user token** (JWT) for each of them, and decides who may chat with whom (e.g. opens DMs) |
+| **App with the SDK** | its Android app, its web page | Asks its own backend for a token, then talks **directly** to Marpokat: WebSocket for live events, REST for the rest |
 | **Marpokat** | this repo | Stores channels and messages, delivers them live, sends push notifications, stores files |
+| **Developer** | whoever builds the social app | Signs up on the website, creates the project, copies its keys, sets up push |
 
 Marpokat never handles passwords. It trusts a user because the tenant backend signed the token with its secret
 (`D10`). Every row in the database has a `tenant_id`, so many apps share one deployment without seeing each other
@@ -48,7 +53,7 @@ Marpokat never handles passwords. It trusts a user because the tenant backend si
 ```
                      ┌──────────────────────────┐
                      │  Tenant backend          │  signs user JWTs with its api secret,
-                     │  (e.g. Narrativ API)     │  upserts users, creates DMs (server token)
+                     │  (the customer's API)    │  upserts users, creates DMs (server token)
                      └──────┬─────────────▲─────┘
                  user token │             │ REST /v1/server/*
                             ▼             │
@@ -79,6 +84,16 @@ Marpokat never handles passwords. It trusts a user because the tenant backend si
  │  outbox relay ─► RabbitMQ ─► push consumer ─► FCM (Google) ─► phone│
  │                           └► media consumer ─► thumbnails          │
  └────────────────────────────────────────────────────────────────────┘
+```
+
+The website sits beside this, not in front of it:
+
+```
+ Browser ── portal (static Vue) ──┐   same host: /console/v1 is routed to the Console API,
+ Browser ── admin  (static Vue) ──┤   everything else to the app's files
+                                  ▼
+                       marpokat api, Console API listener (CONSOLE_ADDR)
+                       accounts, sessions (HttpOnly cookie), projects = tenants, audit
 ```
 
 Two delivery paths, on purpose:
@@ -121,6 +136,7 @@ Two delivery paths, on purpose:
 | --------------- | ------------------------------------------------------------------------ |
 | `server/`       | Go backend, one binary: `marpokat api`, `worker`, `migrate`, `tenant`, `account` |
 | `spec/`         | The contract: `openapi.yaml` (chat REST), `events.md` (WebSocket), `console.yaml` (website API) |
+| (other repo) `marpokat-web` | The website: the portal (developers) and the admin app (operators), static Vue apps on the Console API |
 | `examples/`     | `web-chat`: a one-file client to try the chat by hand                    |
 | `sdk-js/`       | `@rizkysiregar/marpokat-core` and `@rizkysiregar/marpokat-react`          |
 | `sdk-android/`  | Kotlin SDK: `marpokat-core` and `marpokat-android`                        |
@@ -141,17 +157,17 @@ server/
 │   │   └── tenantcmd.go, accountcmd.go, migrate.go   CLI subcommands
 │   │
 │   ├── auth/                X-Api-Key + JWT verification, middleware User / Server
-│   ├── tenant/              tenants, api key → tenant resolver (cached 30 s)
+│   ├── tenant/              tenants, api key → tenant resolver (cached 30 s), purge of deleted projects
 │   ├── user/                users of a tenant (upsert by external id), GET /v1/me
 │   ├── channel/             DMs and groups, members, freeze
 │   ├── message/             send, history, sync, edit, delete, reactions, read marks
 │   ├── media/               attachments: presigned upload, complete, thumbnails, cleaner
 │   ├── device/              push tokens (POST /v1/devices)
-│   ├── realtime/            WebSocket: Hub, Session, Publisher (Redis), Presence
+│   ├── realtime/            WebSocket: Hub, Session, Publisher (Redis), Presence, control topic between pods
 │   ├── outbox/              write events in the transaction; Relay moves them to RabbitMQ
 │   ├── broker/              RabbitMQ topology, publisher with confirms, consumer with retries
 │   ├── push/                push processor: who gets a push, FCM sender, de-dup
-│   ├── console/             accounts, sessions, projects for the website
+│   ├── console/             the Console API: accounts, cookie sessions, projects, deletion, admin, audit, Turnstile
 │   ├── store/               GENERATED by sqlc from queries/*.sql. Do not edit
 │   ├── testdb/              test helper: a fresh Postgres per test
 │   └── platform/            infrastructure, no business logic
@@ -211,7 +227,8 @@ see [section 11](#11-go-for-java-developers).)
 6. Builds the **public server** on `:8080`: `PublicRoutes(...)` wrapped by middleware (CORS, request id, logging +
    metrics, panic recovery, NUL-character check).
 7. Builds the **management server** on `:9090` (`/healthz`, `/readyz`, `/metrics`, never exposed to the internet, `D23`).
-8. Optionally the **console server** (website API) on `CONSOLE_ADDR`.
+8. Optionally the **console server** (website API) on `CONSOLE_ADDR`. It shares the database and Redis, but has its
+   own listener and router: the ingress of the website's hosts sends `/console/v1` there, never the chat API's host.
 9. Starts everything in parallel with an `errgroup` (like `ExecutorService` + `invokeAll`, where the first error
    cancels the rest) and waits.
 
@@ -230,6 +247,7 @@ Opens Postgres, Redis, RabbitMQ, MinIO, then runs these jobs in parallel gorouti
 | Media consumer | `media/processor.go` | Reads queue `marpokat.media` (`attachment.uploaded`): thumbnails, blurhash, video poster (ffmpeg) |
 | Outbox cleaner | `outbox/relay.go` | Deletes published events older than 7 days |
 | Attachment cleaner | `media/cleaner.go` | Deletes uploads nobody used, and files of deleted messages |
+| Project purge | `tenant/purge.go` | Every 10 min: projects whose deletion grace period is over lose their files (object prefix `<tenant id>/`) and every row, in one locked transaction (`D75`) |
 | Stats | `broker/stats.go`, relay | Metrics: outbox pending, queue lengths (alert when a DLQ is not empty) |
 
 There is no web endpoint on the worker except the management port (`:9091` locally).
@@ -430,6 +448,42 @@ expired), reloads changed channels, syncs open channels from their cursor and re
 (server restarting, e.g. deploy) reconnects immediately. If the Hub loses its Redis subscription it closes all its
 sessions with `1012` on purpose: a reconnect + sync is better than silently missing events (`D41`).
 
+### 7.8 The website: accounts and projects (Console API)
+
+`spec/console.yaml`, package `internal/console`. The website's apps are static files with no logic: every rule is
+here.
+
+```mermaid
+sequenceDiagram
+    participant B as Browser (portal)
+    participant C as Console API
+    participant DB as Postgres
+    B->>C: POST /auth/register {email, password, name, turnstile_token}
+    C->>C: validate, rate limit per address, verify Turnstile with Cloudflare (D72)
+    C->>DB: account (argon2id), verification token
+    C-->>B: 201 (same answer whether the address is known or not)
+    Note over B,C: the person opens the link in the e-mail: POST /auth/verify-email
+    B->>C: POST /auth/login
+    C-->>B: Set-Cookie __Host-mp_session (HttpOnly, Secure, SameSite=Strict)  (D70)
+    B->>C: POST /projects {name}   (cookie + Origin checked)
+    C->>DB: tenant row: api key, api secret encrypted
+    C-->>B: project + api_secret, shown this once
+```
+
+Every request that changes something must carry an `Origin` of the portal or the admin app, and a JSON body: with
+the `SameSite=Strict` cookie that rules out cross-site requests. A sign in from the admin app's origin gives an
+**admin session**, only to platform administrators, and only such a session can use `/admin/*` (`D71`).
+Administrators are made with the CLI (`marpokat account promote`), never through the API (`D66`).
+
+### 7.9 Switching a project off, deleting it
+
+| Action | What happens |
+| ------ | ------------ |
+| Switch off | `tenants.disabled_at` is set. Every pod is told at once over the Redis control topic (`marpokat:ctl`): it forgets the cached key, and **closes that tenant's open WebSockets with `4003`** (`D77`). New requests and connections are refused |
+| Delete | Switched off as above, and `delete_after` = now + grace period (3 days by default). It can be restored until then (it stays off), and does not count against the project limit (`D75`) |
+| Purge | The worker removes a project whose `delete_after` has passed: files first, then all its rows in one transaction; the owner gets `project_deleted` in their security log |
+| Rotate secret, change settings | Stored, then announced on the same control topic: every pod drops its cached copy at once |
+
 ## 8. The SDKs (JS and Android)
 
 Both SDKs implement the same rules from `spec/events.md`; their code is structured almost identically, so reading
@@ -476,7 +530,10 @@ Main tables (`server/migrations/00001_init.sql` and later):
 | `message_reactions`, `message_attachments`, `attachments` | reactions, files and their status | |
 | `devices` | push tokens | |
 | `outbox` | events waiting for the relay | cleaned after 7 days |
-| `accounts`, `console_sessions`, ... | the website (console) | `00004_console.sql` |
+| `accounts`, `account_tokens`, `console_sessions`, `console_audit` | the website: accounts, e-mail and reset tokens, cookie sessions (with a `scope`: portal or admin), security events | `00004`–`00006` |
+
+`tenants.account_id` links a project to the account that owns it (null for tenants made with the CLI);
+`tenants.delete_after` is set while a deleted project waits for its purge.
 
 `message_details` is a view (message + sender profile) used by every read path (`D34`).
 
@@ -659,10 +716,21 @@ To add a query: write it in `queries/<table>.sql` with a `-- name: DoThing :one|
 - Never edit a migration that has run in dev; add a new one.
 - Every query on tenant data filters on `tenant_id`.
 - Every Redis key and Pub/Sub channel is built with `redisx.Client.Key` (prefix `marpokat:`).
+- No host names, addresses or credentials in the code or the docs: they are settings of a deployment.
 - Work that must happen goes through the outbox; live notifications go through a `Notifier` after commit.
 
 ## 14. Deployment
 
-Jenkins (`server/Jenkinsfile`) tests, builds `ghcr.io/rizkysiregar/marpokat-server`, and updates
-`homelabs-gitops/apps/marpokat-dev`; Argo CD syncs dev automatically (migrations run as a PreSync Job first). Prod
-(`apps/marpokat`) is promoted by pull request. Setup steps: `homelabs-gitops/apps/marpokat-dev/README.md`.
+One container image (`server/Dockerfile`: distroless, non-root, read-only filesystem) runs as the `api` and
+`worker` Deployments and the `migrate` Job of each environment.
+
+| Step | Where |
+| ---- | ----- |
+| Test, build the image, push it to the container registry | `server/Jenkinsfile` |
+| Point the development environment at the new image | the pipeline writes the tag into the GitOps repository |
+| Apply it (migrations first, as a sync hook) | Argo CD, automatic for development |
+| Production | the same manifests in a production folder, promoted by pull request and synced by hand |
+
+Everything a deployment needs is configuration: `server/.env.example` lists the variables for a local run, and the
+GitOps repository holds the manifests and the setup steps of each environment (databases, broker, object storage,
+DNS and tunnel, secrets).

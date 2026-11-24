@@ -50,10 +50,11 @@ info:
     Text anywhere in a request (JSON, path, query, WebSocket frames) must not contain the NUL character: it is
     answered with `400 bad_request`.
 servers:
-  - url: https://api-dev-marpokat.rizkysiregar.my.id
-    description: dev
-  - url: https://api-marpokat.rizkysiregar.my.id
-    description: prod
+  - url: https://{host}
+    description: The chat API of a Marpokat deployment. Its address is on your project's page on the portal.
+    variables:
+      host:
+        default: chat-api.example.com
 security:
   - apiKey: []
     userToken: []
