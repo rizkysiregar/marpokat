@@ -36,6 +36,8 @@ type WorkerOptions struct {
 	FFmpeg string
 	// AttachmentGrace is how long an upload nobody uses is kept; default a day.
 	AttachmentGrace time.Duration
+	// PurgeEvery is how often deleted projects past their grace period are looked for; default 10 minutes.
+	PurgeEvery time.Duration
 }
 
 func DefaultWorkerOptions() WorkerOptions {
@@ -68,6 +70,7 @@ type Worker struct {
 	relay   *outbox.Relay
 	cleaner *outbox.Cleaner
 	files   *media.Cleaner
+	purger  *tenant.Purger
 	pushC   *broker.Consumer
 	mediaC  *broker.Consumer
 }
@@ -93,6 +96,11 @@ func NewWorker(d WorkerDeps) *Worker {
 	w.relay.Ready = d.Rabbit.Ready
 	w.relay.Interval = o.RelayInterval
 	w.cleaner = outbox.NewCleaner(d.Pool, d.Log)
+	// projects whose deletion grace period is over (PLAN D75): their files too, when there is object storage
+	w.purger = &tenant.Purger{Pool: d.Pool, Log: d.Log.With("subsystem", "tenant-purge"), Every: o.PurgeEvery}
+	if d.Storage != nil {
+		w.purger.Objects = d.Storage
+	}
 
 	fcm := push.NewFCM()
 	if o.FCMBaseURL != "" {
@@ -136,7 +144,7 @@ func NewWorker(d WorkerDeps) *Worker {
 
 // Run runs every job until ctx ends and returns when they have all stopped.
 func (w *Worker) Run(ctx context.Context) {
-	jobs := []func(context.Context){w.relay.Run, w.pushC.Run, w.cleaner.Run}
+	jobs := []func(context.Context){w.relay.Run, w.pushC.Run, w.cleaner.Run, w.purger.Run}
 	if w.mediaC != nil {
 		jobs = append(jobs, w.mediaC.Run, w.files.Run)
 	}

@@ -12,6 +12,33 @@ import (
 	"github.com/google/uuid"
 )
 
+const cancelTenantDeletion = `-- name: CancelTenantDeletion :one
+UPDATE tenants SET delete_after = NULL WHERE id = $1 RETURNING id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after
+`
+
+// Restoring keeps the project switched off: the owner switches it on when ready.
+func (q *Queries) CancelTenantDeletion(ctx context.Context, id uuid.UUID) (Tenant, error) {
+	row := q.db.QueryRow(ctx, cancelTenantDeletion, id)
+	var i Tenant
+	err := row.Scan(
+		&i.ID,
+		&i.Slug,
+		&i.Name,
+		&i.ApiKey,
+		&i.ApiSecretEnc,
+		&i.Config,
+		&i.FcmCredentialsEnc,
+		&i.WebhookUrl,
+		&i.WebhookSecretEnc,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.DisabledAt,
+		&i.AccountID,
+		&i.DeleteAfter,
+	)
+	return i, err
+}
+
 const consumeAccountToken = `-- name: ConsumeAccountToken :one
 UPDATE account_tokens SET used_at = now()
 WHERE token_hash = $1 AND kind = $2 AND used_at IS NULL AND expires_at > now()
@@ -60,9 +87,10 @@ func (q *Queries) CountRecentAccountTokens(ctx context.Context, arg CountRecentA
 }
 
 const countTenantsOfAccount = `-- name: CountTenantsOfAccount :one
-SELECT count(*) FROM tenants WHERE account_id = $1
+SELECT count(*) FROM tenants WHERE account_id = $1 AND delete_after IS NULL
 `
 
+// A project waiting to be deleted does not count against the limit.
 func (q *Queries) CountTenantsOfAccount(ctx context.Context, accountID uuid.NullUUID) (int64, error) {
 	row := q.db.QueryRow(ctx, countTenantsOfAccount, accountID)
 	var count int64
@@ -163,6 +191,32 @@ func (q *Queries) DeleteSession(ctx context.Context, id uuid.UUID) error {
 	return err
 }
 
+const deleteSessionOfAccount = `-- name: DeleteSessionOfAccount :execrows
+DELETE FROM console_sessions WHERE id = $1 AND account_id = $2
+`
+
+type DeleteSessionOfAccountParams struct {
+	ID        uuid.UUID
+	AccountID uuid.UUID
+}
+
+func (q *Queries) DeleteSessionOfAccount(ctx context.Context, arg DeleteSessionOfAccountParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteSessionOfAccount, arg.ID, arg.AccountID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const deleteTenantRow = `-- name: DeleteTenantRow :exec
+DELETE FROM tenants WHERE id = $1
+`
+
+func (q *Queries) DeleteTenantRow(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, deleteTenantRow, id)
+	return err
+}
+
 const getAccountByEmail = `-- name: GetAccountByEmail :one
 SELECT id, email, name, password_hash, email_verified_at, is_platform_admin, disabled_at, created_at, updated_at FROM accounts WHERE lower(email) = lower($1)
 `
@@ -228,7 +282,7 @@ func (q *Queries) GetSessionByHash(ctx context.Context, tokenHash []byte) (Conso
 }
 
 const getTenantOfAccount = `-- name: GetTenantOfAccount :one
-SELECT id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id FROM tenants WHERE id = $1 AND account_id = $2
+SELECT id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after FROM tenants WHERE id = $1 AND account_id = $2
 `
 
 type GetTenantOfAccountParams struct {
@@ -253,12 +307,13 @@ func (q *Queries) GetTenantOfAccount(ctx context.Context, arg GetTenantOfAccount
 		&i.UpdatedAt,
 		&i.DisabledAt,
 		&i.AccountID,
+		&i.DeleteAfter,
 	)
 	return i, err
 }
 
 const getTenantWithOwner = `-- name: GetTenantWithOwner :one
-SELECT t.id, t.slug, t.name, t.api_key, t.api_secret_enc, t.config, t.fcm_credentials_enc, t.webhook_url, t.webhook_secret_enc, t.created_at, t.updated_at, t.disabled_at, t.account_id, a.email AS owner_email
+SELECT t.id, t.slug, t.name, t.api_key, t.api_secret_enc, t.config, t.fcm_credentials_enc, t.webhook_url, t.webhook_secret_enc, t.created_at, t.updated_at, t.disabled_at, t.account_id, t.delete_after, a.email AS owner_email
 FROM tenants t LEFT JOIN accounts a ON a.id = t.account_id
 WHERE t.id = $1
 `
@@ -285,6 +340,7 @@ func (q *Queries) GetTenantWithOwner(ctx context.Context, id uuid.UUID) (GetTena
 		&i.Tenant.UpdatedAt,
 		&i.Tenant.DisabledAt,
 		&i.Tenant.AccountID,
+		&i.Tenant.DeleteAfter,
 		&i.OwnerEmail,
 	)
 	return i, err
@@ -400,16 +456,22 @@ func (q *Queries) ListAccountSessions(ctx context.Context, accountID uuid.UUID) 
 }
 
 const listAccounts = `-- name: ListAccounts :many
-SELECT id, email, name, password_hash, email_verified_at, is_platform_admin, disabled_at, created_at, updated_at FROM accounts WHERE id > $1::uuid ORDER BY id LIMIT $2
+SELECT id, email, name, password_hash, email_verified_at, is_platform_admin, disabled_at, created_at, updated_at FROM accounts
+WHERE id > $1::uuid
+  AND ($2::text = '' OR email ILIKE $2::text OR name ILIKE $2::text)
+ORDER BY id
+LIMIT $3
 `
 
 type ListAccountsParams struct {
 	After   uuid.UUID
+	Pattern string
 	MaxRows int32
 }
 
+// Accounts in id order, optionally only those whose e-mail or name contains the search (an ILIKE pattern, escaped).
 func (q *Queries) ListAccounts(ctx context.Context, arg ListAccountsParams) ([]Account, error) {
-	rows, err := q.db.Query(ctx, listAccounts, arg.After, arg.MaxRows)
+	rows, err := q.db.Query(ctx, listAccounts, arg.After, arg.Pattern, arg.MaxRows)
 	if err != nil {
 		return nil, err
 	}
@@ -439,7 +501,7 @@ func (q *Queries) ListAccounts(ctx context.Context, arg ListAccountsParams) ([]A
 }
 
 const listAllTenantsWithOwner = `-- name: ListAllTenantsWithOwner :many
-SELECT t.id, t.slug, t.name, t.api_key, t.api_secret_enc, t.config, t.fcm_credentials_enc, t.webhook_url, t.webhook_secret_enc, t.created_at, t.updated_at, t.disabled_at, t.account_id, a.email AS owner_email
+SELECT t.id, t.slug, t.name, t.api_key, t.api_secret_enc, t.config, t.fcm_credentials_enc, t.webhook_url, t.webhook_secret_enc, t.created_at, t.updated_at, t.disabled_at, t.account_id, t.delete_after, a.email AS owner_email
 FROM tenants t LEFT JOIN accounts a ON a.id = t.account_id
 ORDER BY t.created_at
 `
@@ -472,6 +534,7 @@ func (q *Queries) ListAllTenantsWithOwner(ctx context.Context) ([]ListAllTenants
 			&i.Tenant.UpdatedAt,
 			&i.Tenant.DisabledAt,
 			&i.Tenant.AccountID,
+			&i.Tenant.DeleteAfter,
 			&i.OwnerEmail,
 		); err != nil {
 			return nil, err
@@ -520,8 +583,66 @@ func (q *Queries) ListAudit(ctx context.Context, arg ListAuditParams) ([]Console
 	return items, nil
 }
 
+const listPlatformAudit = `-- name: ListPlatformAudit :many
+SELECT e.id, e.account_id, e.action, e.target, e.ip, e.created_at, a.email AS account_email
+FROM console_audit e JOIN accounts a ON a.id = e.account_id
+WHERE ($1::text IS NULL OR e.action = $1::text)
+  AND ($2::uuid IS NULL OR e.account_id = $2::uuid)
+  AND ($3::uuid IS NULL OR (e.created_at, e.id) < (
+        SELECT b.created_at, b.id FROM console_audit b WHERE b.id = $3::uuid))
+ORDER BY e.created_at DESC, e.id DESC
+LIMIT $4
+`
+
+type ListPlatformAuditParams struct {
+	Action    *string
+	AccountID uuid.NullUUID
+	BeforeID  uuid.NullUUID
+	MaxRows   int32
+}
+
+type ListPlatformAuditRow struct {
+	ConsoleAudit ConsoleAudit
+	AccountEmail string
+}
+
+// The whole platform's audit log, newest first, with the e-mail of each account. Optional filters; the cursor is the id
+// of the last event of the previous page.
+func (q *Queries) ListPlatformAudit(ctx context.Context, arg ListPlatformAuditParams) ([]ListPlatformAuditRow, error) {
+	rows, err := q.db.Query(ctx, listPlatformAudit,
+		arg.Action,
+		arg.AccountID,
+		arg.BeforeID,
+		arg.MaxRows,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListPlatformAuditRow{}
+	for rows.Next() {
+		var i ListPlatformAuditRow
+		if err := rows.Scan(
+			&i.ConsoleAudit.ID,
+			&i.ConsoleAudit.AccountID,
+			&i.ConsoleAudit.Action,
+			&i.ConsoleAudit.Target,
+			&i.ConsoleAudit.Ip,
+			&i.ConsoleAudit.CreatedAt,
+			&i.AccountEmail,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listTenantsOfAccount = `-- name: ListTenantsOfAccount :many
-SELECT id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id FROM tenants WHERE account_id = $1 ORDER BY created_at
+SELECT id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after FROM tenants WHERE account_id = $1 ORDER BY created_at
 `
 
 func (q *Queries) ListTenantsOfAccount(ctx context.Context, accountID uuid.NullUUID) ([]Tenant, error) {
@@ -547,6 +668,94 @@ func (q *Queries) ListTenantsOfAccount(ctx context.Context, accountID uuid.NullU
 			&i.UpdatedAt,
 			&i.DisabledAt,
 			&i.AccountID,
+			&i.DeleteAfter,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const lockDueTenantDeletion = `-- name: LockDueTenantDeletion :one
+SELECT id, slug, account_id FROM tenants
+WHERE delete_after IS NOT NULL AND delete_after <= now()
+ORDER BY delete_after
+LIMIT 1
+FOR UPDATE SKIP LOCKED
+`
+
+type LockDueTenantDeletionRow struct {
+	ID        uuid.UUID
+	Slug      string
+	AccountID uuid.NullUUID
+}
+
+// The next project whose grace period is over, locked so that two workers never purge the same one.
+func (q *Queries) LockDueTenantDeletion(ctx context.Context) (LockDueTenantDeletionRow, error) {
+	row := q.db.QueryRow(ctx, lockDueTenantDeletion)
+	var i LockDueTenantDeletionRow
+	err := row.Scan(&i.ID, &i.Slug, &i.AccountID)
+	return i, err
+}
+
+const platformDailySeries = `-- name: PlatformDailySeries :many
+WITH days AS (
+    SELECT generate_series(
+        date_trunc('day', now() AT TIME ZONE 'UTC') - ($1::int - 1) * interval '1 day',
+        date_trunc('day', now() AT TIME ZONE 'UTC'),
+        interval '1 day') AS day
+), since AS (SELECT min(day) AT TIME ZONE 'UTC' AS t FROM days),
+acc AS (
+    SELECT date_trunc('day', created_at AT TIME ZONE 'UTC') AS day, count(*) AS n
+    FROM accounts WHERE created_at >= (SELECT t FROM since) GROUP BY 1
+), prj AS (
+    SELECT date_trunc('day', created_at AT TIME ZONE 'UTC') AS day, count(*) AS n
+    FROM tenants WHERE created_at >= (SELECT t FROM since) GROUP BY 1
+), msg AS (
+    SELECT date_trunc('day', created_at AT TIME ZONE 'UTC') AS day, count(*) AS n, count(DISTINCT sender_id) AS senders
+    FROM messages WHERE created_at >= (SELECT t FROM since) AND type <> 'system' GROUP BY 1
+)
+SELECT to_char(days.day, 'YYYY-MM-DD') AS day,
+       coalesce(acc.n, 0)::bigint AS accounts,
+       coalesce(prj.n, 0)::bigint AS projects,
+       coalesce(msg.n, 0)::bigint AS messages,
+       coalesce(msg.senders, 0)::bigint AS active_users
+FROM days
+LEFT JOIN acc ON acc.day = days.day
+LEFT JOIN prj ON prj.day = days.day
+LEFT JOIN msg ON msg.day = days.day
+ORDER BY days.day
+`
+
+type PlatformDailySeriesRow struct {
+	Day         string
+	Accounts    int64
+	Projects    int64
+	Messages    int64
+	ActiveUsers int64
+}
+
+// Per day (UTC) over the last N days, today included: new accounts, new projects, messages sent and people who sent
+// one (system messages are not counted).
+func (q *Queries) PlatformDailySeries(ctx context.Context, days int32) ([]PlatformDailySeriesRow, error) {
+	rows, err := q.db.Query(ctx, platformDailySeries, days)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []PlatformDailySeriesRow{}
+	for rows.Next() {
+		var i PlatformDailySeriesRow
+		if err := rows.Scan(
+			&i.Day,
+			&i.Accounts,
+			&i.Projects,
+			&i.Messages,
+			&i.ActiveUsers,
 		); err != nil {
 			return nil, err
 		}
@@ -591,6 +800,88 @@ func (q *Queries) PlatformUsage(ctx context.Context) (PlatformUsageRow, error) {
 	return i, err
 }
 
+const purgeTenantAttachments = `-- name: PurgeTenantAttachments :exec
+DELETE FROM attachments WHERE tenant_id = $1
+`
+
+func (q *Queries) PurgeTenantAttachments(ctx context.Context, tenantID uuid.UUID) error {
+	_, err := q.db.Exec(ctx, purgeTenantAttachments, tenantID)
+	return err
+}
+
+const purgeTenantChannels = `-- name: PurgeTenantChannels :exec
+DELETE FROM channels WHERE tenant_id = $1
+`
+
+// Everything of a tenant, in an order the foreign keys accept. Channels take their members, messages, reactions and
+// message attachments with them (ON DELETE CASCADE).
+func (q *Queries) PurgeTenantChannels(ctx context.Context, tenantID uuid.UUID) error {
+	_, err := q.db.Exec(ctx, purgeTenantChannels, tenantID)
+	return err
+}
+
+const purgeTenantDevices = `-- name: PurgeTenantDevices :exec
+DELETE FROM devices WHERE tenant_id = $1
+`
+
+func (q *Queries) PurgeTenantDevices(ctx context.Context, tenantID uuid.UUID) error {
+	_, err := q.db.Exec(ctx, purgeTenantDevices, tenantID)
+	return err
+}
+
+const purgeTenantOutbox = `-- name: PurgeTenantOutbox :exec
+DELETE FROM outbox WHERE tenant_id = $1
+`
+
+func (q *Queries) PurgeTenantOutbox(ctx context.Context, tenantID uuid.UUID) error {
+	_, err := q.db.Exec(ctx, purgeTenantOutbox, tenantID)
+	return err
+}
+
+const purgeTenantUsers = `-- name: PurgeTenantUsers :exec
+DELETE FROM users WHERE tenant_id = $1
+`
+
+func (q *Queries) PurgeTenantUsers(ctx context.Context, tenantID uuid.UUID) error {
+	_, err := q.db.Exec(ctx, purgeTenantUsers, tenantID)
+	return err
+}
+
+const scheduleTenantDeletion = `-- name: ScheduleTenantDeletion :one
+UPDATE tenants
+SET delete_after = coalesce(delete_after, $1::timestamptz), disabled_at = coalesce(disabled_at, now())
+WHERE id = $2
+RETURNING id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after
+`
+
+type ScheduleTenantDeletionParams struct {
+	DeleteAfter time.Time
+	ID          uuid.UUID
+}
+
+// Switches the project off and sets when it goes for good. A project already scheduled keeps its date.
+func (q *Queries) ScheduleTenantDeletion(ctx context.Context, arg ScheduleTenantDeletionParams) (Tenant, error) {
+	row := q.db.QueryRow(ctx, scheduleTenantDeletion, arg.DeleteAfter, arg.ID)
+	var i Tenant
+	err := row.Scan(
+		&i.ID,
+		&i.Slug,
+		&i.Name,
+		&i.ApiKey,
+		&i.ApiSecretEnc,
+		&i.Config,
+		&i.FcmCredentialsEnc,
+		&i.WebhookUrl,
+		&i.WebhookSecretEnc,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.DisabledAt,
+		&i.AccountID,
+		&i.DeleteAfter,
+	)
+	return i, err
+}
+
 const setAccountDisabled = `-- name: SetAccountDisabled :one
 UPDATE accounts
 SET disabled_at = CASE WHEN $1::boolean THEN coalesce(disabled_at, now()) ELSE NULL END
@@ -629,8 +920,8 @@ func (q *Queries) SetAccountEmailVerified(ctx context.Context, id uuid.UUID) err
 	return err
 }
 
-const setAccountPlatformAdmin = `-- name: SetAccountPlatformAdmin :execrows
-UPDATE accounts SET is_platform_admin = $1::boolean WHERE lower(email) = lower($2)
+const setAccountPlatformAdmin = `-- name: SetAccountPlatformAdmin :one
+UPDATE accounts SET is_platform_admin = $1::boolean WHERE lower(email) = lower($2) RETURNING id
 `
 
 type SetAccountPlatformAdminParams struct {
@@ -638,12 +929,11 @@ type SetAccountPlatformAdminParams struct {
 	Email string
 }
 
-func (q *Queries) SetAccountPlatformAdmin(ctx context.Context, arg SetAccountPlatformAdminParams) (int64, error) {
-	result, err := q.db.Exec(ctx, setAccountPlatformAdmin, arg.Admin, arg.Email)
-	if err != nil {
-		return 0, err
-	}
-	return result.RowsAffected(), nil
+func (q *Queries) SetAccountPlatformAdmin(ctx context.Context, arg SetAccountPlatformAdminParams) (uuid.UUID, error) {
+	row := q.db.QueryRow(ctx, setAccountPlatformAdmin, arg.Admin, arg.Email)
+	var id uuid.UUID
+	err := row.Scan(&id)
+	return id, err
 }
 
 const tenantUsage = `-- name: TenantUsage :one
@@ -665,6 +955,53 @@ func (q *Queries) TenantUsage(ctx context.Context, forTenant uuid.UUID) (TenantU
 	var i TenantUsageRow
 	err := row.Scan(&i.Users, &i.Channels, &i.Messages)
 	return i, err
+}
+
+const topTenantsByMessages = `-- name: TopTenantsByMessages :many
+SELECT t.id, t.name, t.slug, count(*)::bigint AS messages
+FROM messages m JOIN tenants t ON t.id = m.tenant_id
+WHERE m.created_at >= $1::timestamptz AND m.type <> 'system'
+GROUP BY t.id, t.name, t.slug
+ORDER BY messages DESC
+LIMIT $2
+`
+
+type TopTenantsByMessagesParams struct {
+	Since   time.Time
+	MaxRows int32
+}
+
+type TopTenantsByMessagesRow struct {
+	ID       uuid.UUID
+	Name     string
+	Slug     string
+	Messages int64
+}
+
+// The projects that sent the most messages since a time.
+func (q *Queries) TopTenantsByMessages(ctx context.Context, arg TopTenantsByMessagesParams) ([]TopTenantsByMessagesRow, error) {
+	rows, err := q.db.Query(ctx, topTenantsByMessages, arg.Since, arg.MaxRows)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []TopTenantsByMessagesRow{}
+	for rows.Next() {
+		var i TopTenantsByMessagesRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Slug,
+			&i.Messages,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const touchSession = `-- name: TouchSession :exec

@@ -15,7 +15,7 @@ const createTenant = `-- name: CreateTenant :one
 
 INSERT INTO tenants (id, slug, name, api_key, api_secret_enc, config, account_id)
 VALUES ($1, $2, $3, $4, $5, $6, $7)
-RETURNING id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id
+RETURNING id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after
 `
 
 type CreateTenantParams struct {
@@ -54,12 +54,13 @@ func (q *Queries) CreateTenant(ctx context.Context, arg CreateTenantParams) (Ten
 		&i.UpdatedAt,
 		&i.DisabledAt,
 		&i.AccountID,
+		&i.DeleteAfter,
 	)
 	return i, err
 }
 
 const getTenantByAPIKey = `-- name: GetTenantByAPIKey :one
-SELECT id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id FROM tenants WHERE api_key = $1 AND disabled_at IS NULL
+SELECT id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after FROM tenants WHERE api_key = $1 AND disabled_at IS NULL
 `
 
 func (q *Queries) GetTenantByAPIKey(ctx context.Context, apiKey string) (Tenant, error) {
@@ -79,12 +80,13 @@ func (q *Queries) GetTenantByAPIKey(ctx context.Context, apiKey string) (Tenant,
 		&i.UpdatedAt,
 		&i.DisabledAt,
 		&i.AccountID,
+		&i.DeleteAfter,
 	)
 	return i, err
 }
 
 const getTenantByID = `-- name: GetTenantByID :one
-SELECT id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id FROM tenants WHERE id = $1
+SELECT id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after FROM tenants WHERE id = $1
 `
 
 func (q *Queries) GetTenantByID(ctx context.Context, id uuid.UUID) (Tenant, error) {
@@ -104,12 +106,13 @@ func (q *Queries) GetTenantByID(ctx context.Context, id uuid.UUID) (Tenant, erro
 		&i.UpdatedAt,
 		&i.DisabledAt,
 		&i.AccountID,
+		&i.DeleteAfter,
 	)
 	return i, err
 }
 
 const getTenantBySlug = `-- name: GetTenantBySlug :one
-SELECT id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id FROM tenants WHERE slug = $1
+SELECT id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after FROM tenants WHERE slug = $1
 `
 
 func (q *Queries) GetTenantBySlug(ctx context.Context, slug string) (Tenant, error) {
@@ -129,12 +132,13 @@ func (q *Queries) GetTenantBySlug(ctx context.Context, slug string) (Tenant, err
 		&i.UpdatedAt,
 		&i.DisabledAt,
 		&i.AccountID,
+		&i.DeleteAfter,
 	)
 	return i, err
 }
 
 const listTenants = `-- name: ListTenants :many
-SELECT id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id FROM tenants ORDER BY created_at
+SELECT id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after FROM tenants ORDER BY created_at
 `
 
 func (q *Queries) ListTenants(ctx context.Context) ([]Tenant, error) {
@@ -160,6 +164,7 @@ func (q *Queries) ListTenants(ctx context.Context) ([]Tenant, error) {
 			&i.UpdatedAt,
 			&i.DisabledAt,
 			&i.AccountID,
+			&i.DeleteAfter,
 		); err != nil {
 			return nil, err
 		}

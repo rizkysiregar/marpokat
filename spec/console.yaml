@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Marpokat Console API
-  version: 0.2.0
+  version: 0.3.0
   description: |
     The API behind the Marpokat website: the **portal** (landing, docs, sign up, project management) and the **admin**
     app (internal). Both are static apps that hold no data and no logic of their own: they call this API from the
@@ -41,6 +41,10 @@ info:
     A project is a tenant of the chat API (`spec/openapi.yaml`): its `api_key` goes into apps, its `api_secret` stays
     in the app's backend. An account can have a limited number of projects (default 3).
 
+    Deleting a project (PLAN D75) switches it off at once and schedules it: `delete_after` says when the worker removes
+    it with all its users, conversations, messages and files (3 days by default). Until then it can be restored (it
+    stays off until switched on) and it does not count against the limit; it cannot be switched on while scheduled.
+
     ## Errors
     Same shape as the chat API: `{ "error": { "code", "message", "details?" } }`. Limits answer `429 rate_limited`
     with `Retry-After`.
@@ -58,6 +62,13 @@ tags:
   - { name: Platform admin, description: "Only for accounts with `is_platform_admin`" }
 security: []
 paths:
+  /status:
+    get:
+      tags: [Auth]
+      summary: What the sign up page should offer
+      operationId: status
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object, required: [registration_open], properties: { registration_open: { type: boolean } } } } } }
   /auth/register:
     post:
       tags: [Auth]
@@ -79,6 +90,7 @@ paths:
       responses:
         "201": { description: Registered, content: { application/json: { schema: { type: object, properties: { message: { type: string } } } } } }
         "400": { description: "Validation failed, or `captcha_failed`", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "403": { description: "Sign up is closed for now (`registration_closed`)", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "429": { $ref: "#/components/responses/RateLimited" }
         "503": { $ref: "#/components/responses/CaptchaUnavailable" }
   /auth/verify-email:
@@ -201,6 +213,18 @@ paths:
       security: [{ session: [] }]
       responses:
         "200": { description: OK, content: { application/json: { schema: { type: object, properties: { sessions: { type: array, items: { $ref: "#/components/schemas/SessionInfo" } } } } } } }
+  /me/sessions/{session_id}:
+    delete:
+      tags: [Account]
+      summary: Sign out one session of the account
+      description: Ending the current session is a sign out (the cookie is cleared). A session of another account is 404.
+      operationId: endSession
+      security: [{ session: [] }]
+      parameters:
+        - { name: session_id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "204": { description: Ended }
+        "404": { $ref: "#/components/responses/NotFound" }
   /me/audit:
     get:
       tags: [Account]
@@ -269,6 +293,31 @@ paths:
       responses:
         "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Project" } } } }
         "400": { $ref: "#/components/responses/Validation" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Projects]
+      summary: Delete the project, after a grace period
+      description: Switches it off now and sets `delete_after`. Asks the password. Asking again changes nothing.
+      operationId: deleteProject
+      security: [{ session: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/PasswordConfirmation" } } }
+      responses:
+        "202": { description: Scheduled, content: { application/json: { schema: { $ref: "#/components/schemas/Project" } } } }
+        "403": { $ref: "#/components/responses/WrongPassword" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /projects/{project_id}/restore:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Projects]
+      summary: Cancel a scheduled deletion
+      description: The project stays switched off.
+      operationId: restoreProject
+      security: [{ session: [] }]
+      responses:
+        "200": { description: Restored, content: { application/json: { schema: { $ref: "#/components/schemas/Project" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
   /projects/{project_id}/rotate-secret:
     post:
@@ -358,11 +407,47 @@ paths:
       operationId: adminListAccounts
       security: [{ session: [] }]
       parameters:
+        - { name: q, in: query, description: "Only accounts whose e-mail or name contains this", schema: { type: string, maxLength: 100 } }
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
         - { name: cursor, in: query, schema: { type: string } }
       responses:
         "200": { description: OK, content: { application/json: { schema: { type: object, properties: { accounts: { type: array, items: { $ref: "#/components/schemas/Account" } }, next_cursor: { type: [string, "null"] } } } } } }
         "403": { $ref: "#/components/responses/Forbidden" }
+  /admin/accounts/{account_id}:
+    get:
+      tags: [Platform admin]
+      summary: One account, its projects, sessions and recent security events
+      operationId: adminGetAccount
+      security: [{ session: [] }]
+      parameters:
+        - { name: account_id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  account: { $ref: "#/components/schemas/Account" }
+                  projects: { type: array, items: { $ref: "#/components/schemas/Project" } }
+                  sessions: { type: array, items: { $ref: "#/components/schemas/SessionInfo" } }
+                  events: { type: array, items: { $ref: "#/components/schemas/AuditEvent" } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /admin/accounts/{account_id}/sign-out:
+    post:
+      tags: [Platform admin]
+      summary: End every session of an account, without disabling it
+      operationId: adminSignOutAccount
+      security: [{ session: [] }]
+      parameters:
+        - { name: account_id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "204": { description: Signed out }
+        "400": { description: Not your own account, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
   /admin/accounts/{account_id}/disable:
     post:
       tags: [Platform admin]
@@ -423,6 +508,81 @@ paths:
                   users: { type: integer }
                   channels: { type: integer }
                   messages: { type: integer, format: int64 }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /admin/stats/series:
+    get:
+      tags: [Platform admin]
+      summary: Per day (UTC) over a period, and the busiest projects of it
+      description: New accounts, new projects, messages sent and people who sent one (system messages are not counted).
+      operationId: adminStatsSeries
+      security: [{ session: [] }]
+      parameters:
+        - { name: days, in: query, schema: { type: integer, enum: [7, 30, 90], default: 30 } }
+      responses:
+        "200":
+          description: Oldest day first, today last
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  days:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        day: { type: string, format: date }
+                        accounts: { type: integer }
+                        projects: { type: integer }
+                        messages: { type: integer, format: int64 }
+                        active_users: { type: integer }
+                  top_projects:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id: { type: string, format: uuid }
+                        name: { type: string }
+                        slug: { type: string }
+                        messages: { type: integer, format: int64 }
+        "400": { $ref: "#/components/responses/Validation" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /admin/projects/{project_id}:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    get:
+      tags: [Platform admin]
+      summary: One project with its owner, usage and push status
+      operationId: adminGetProject
+      security: [{ session: [] }]
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  project: { $ref: "#/components/schemas/AdminProject" }
+                  owner_id: { type: [string, "null"], format: uuid }
+                  usage: { type: object, properties: { users: { type: integer }, channels: { type: integer }, messages: { type: integer, format: int64 } } }
+                  push: { $ref: "#/components/schemas/PushStatus" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /admin/audit:
+    get:
+      tags: [Platform admin]
+      summary: The security events of every account, newest first
+      operationId: adminAudit
+      security: [{ session: [] }]
+      parameters:
+        - { name: action, in: query, schema: { type: string } }
+        - { name: account_id, in: query, schema: { type: string, format: uuid } }
+        - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
+        - { name: cursor, in: query, description: The `next_cursor` of the previous page, schema: { type: string } }
+      responses:
+        "200": { description: OK, content: { application/json: { schema: { type: object, properties: { events: { type: array, items: { $ref: "#/components/schemas/AuditEvent" } }, next_cursor: { type: [string, "null"] } } } } } }
+        "400": { $ref: "#/components/responses/Validation" }
         "403": { $ref: "#/components/responses/Forbidden" }
 components:
   securitySchemes:
@@ -485,6 +645,9 @@ components:
     AuditEvent:
       type: object
       properties:
+        id: { type: string, format: uuid }
+        account_id: { type: string, format: uuid, description: "Only in the platform audit log" }
+        account_email: { type: string, description: "Only in the platform audit log" }
         action: { type: string, examples: [login, admin_login, password_changed, project_created, secret_rotated, push_set] }
         target: { type: [string, "null"] }
         ip: { type: string }
@@ -501,6 +664,7 @@ components:
         client_can_create_group: { type: boolean }
         push_configured: { type: boolean }
         disabled: { type: boolean }
+        delete_after: { type: [string, "null"], format: date-time, description: "When a deleted project is removed for good; null when it is not being deleted" }
         created_at: { type: string, format: date-time }
     ProjectWithSecret:
       allOf:

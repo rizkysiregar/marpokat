@@ -4,6 +4,7 @@ import (
 	"encoding/base64"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestPostgresDSNEscapesPassword(t *testing.T) {
@@ -80,7 +81,7 @@ func TestLoadRequiresVariables(t *testing.T) {
 
 func TestConsoleValidate(t *testing.T) {
 	proxies := []string{"10.0.0.0/8", "127.0.0.0/8"}
-	good := Console{Addr: ":8081", BaseURL: "https://marpokat.example.com", MailDriver: "log", TrustedProxies: proxies,
+	good := Console{Addr: ":8081", BaseURL: "https://marpokat.example.com", MailDriver: "log", TrustedProxies: proxies, DeletionGrace: 72 * time.Hour,
 		AllowedOrigins: []string{"http://localhost:3000"}, AdminOrigins: []string{"https://admin.marpokat.example.com"}}
 	if err := good.Validate(); err != nil {
 		t.Fatalf("a good config was refused: %v", err)
@@ -96,6 +97,7 @@ func TestConsoleValidate(t *testing.T) {
 		"admin origin not a URL":   func(c *Console) { c.AdminOrigins = []string{"ftp://admin.example.com"} },
 		"admin on the portal host": func(c *Console) { c.AdminOrigins = []string{"https://MARPOKAT.example.com"} },
 		"bad proxy":                func(c *Console) { c.TrustedProxies = []string{"10.0.0.0"} },
+		"grace too short":          func(c *Console) { c.DeletionGrace = time.Minute },
 		"bad turnstile url":        func(c *Console) { c.TurnstileSecretKey = "s"; c.TurnstileVerifyURL = "nope" },
 		"unknown driver":           func(c *Console) { c.MailDriver = "pigeon" },
 		"smtp without host":        func(c *Console) { c.MailDriver = "smtp"; c.MailFrom = "a@b.co" },
@@ -134,5 +136,8 @@ func TestConsoleDefaultsTrustThePrivateRanges(t *testing.T) {
 	p, err := c.TrustedProxyPrefixes()
 	if err != nil || len(p) != 6 {
 		t.Fatalf("default proxies: %v %v", p, err)
+	}
+	if !c.RegistrationOpen || c.DeletionGrace != 72*time.Hour {
+		t.Fatalf("defaults: registration open %v, grace %s", c.RegistrationOpen, c.DeletionGrace)
 	}
 }

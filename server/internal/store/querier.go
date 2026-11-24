@@ -26,12 +26,15 @@ type Querier interface {
 	// transaction ends, so sends to one channel commit in seq order and a reader never sees seq N+1 without N.
 	// With check_frozen, a frozen channel matches nothing.
 	BumpChannelSeq(ctx context.Context, arg BumpChannelSeqParams) (BumpChannelSeqRow, error)
+	// Restoring keeps the project switched off: the owner switches it on when ready.
+	CancelTenantDeletion(ctx context.Context, id uuid.UUID) (Tenant, error)
 	// A token that can still be used, locked: it is spent in the same transaction.
 	ConsumeAccountToken(ctx context.Context, arg ConsumeAccountTokenParams) (uuid.UUID, error)
 	CountAccounts(ctx context.Context) (int64, error)
 	CountActiveMembers(ctx context.Context, arg CountActiveMembersParams) (int32, error)
 	CountOutboxPending(ctx context.Context) (int64, error)
 	CountRecentAccountTokens(ctx context.Context, arg CountRecentAccountTokensParams) (int64, error)
+	// A project waiting to be deleted does not count against the limit.
 	CountTenantsOfAccount(ctx context.Context, accountID uuid.NullUUID) (int64, error)
 	CountUserReactions(ctx context.Context, arg CountUserReactionsParams) (int32, error)
 	// The website's accounts, sessions and the projects (tenants) they own. Tenant chat data is never touched here.
@@ -50,6 +53,8 @@ type Querier interface {
 	DeleteOutboxPublishedBefore(ctx context.Context, publishedAt *time.Time) (int64, error)
 	DeleteReaction(ctx context.Context, arg DeleteReactionParams) (int64, error)
 	DeleteSession(ctx context.Context, id uuid.UUID) error
+	DeleteSessionOfAccount(ctx context.Context, arg DeleteSessionOfAccountParams) (int64, error)
+	DeleteTenantRow(ctx context.Context, id uuid.UUID) error
 	DeleteUnusedAttachment(ctx context.Context, id uuid.UUID) (int64, error)
 	DeleteUserDevices(ctx context.Context, arg DeleteUserDevicesParams) error
 	FinishAttachment(ctx context.Context, arg FinishAttachmentParams) error
@@ -88,6 +93,7 @@ type Querier interface {
 	LeaveAllChannels(ctx context.Context, arg LeaveAllChannelsParams) error
 	LinkAttachment(ctx context.Context, arg LinkAttachmentParams) error
 	ListAccountSessions(ctx context.Context, accountID uuid.UUID) ([]ConsoleSession, error)
+	// Accounts in id order, optionally only those whose e-mail or name contains the search (an ILIKE pattern, escaped).
 	ListAccounts(ctx context.Context, arg ListAccountsParams) ([]Account, error)
 	// Who receives events of a channel: its active members.
 	ListActiveMemberIDs(ctx context.Context, arg ListActiveMemberIDsParams) ([]uuid.UUID, error)
@@ -115,6 +121,9 @@ type Querier interface {
 	ListMessagesUsingAttachment(ctx context.Context, arg ListMessagesUsingAttachmentParams) ([]ListMessagesUsingAttachmentRow, error)
 	// What one user reacted with on the given messages (comma separated ids).
 	ListMyReactions(ctx context.Context, arg ListMyReactionsParams) ([]ListMyReactionsRow, error)
+	// The whole platform's audit log, newest first, with the e-mail of each account. Optional filters; the cursor is the id
+	// of the last event of the previous page.
+	ListPlatformAudit(ctx context.Context, arg ListPlatformAuditParams) ([]ListPlatformAuditRow, error)
 	// Who could be sent a push for a message: active members other than the sender who are not muted and have not read it
 	// yet, with the unread count to show. Whether they are online is decided later, from presence.
 	ListPushRecipients(ctx context.Context, arg ListPushRecipientsParams) ([]ListPushRecipientsRow, error)
@@ -130,6 +139,8 @@ type Querier interface {
 	LockAttachment(ctx context.Context, arg LockAttachmentParams) (Attachment, error)
 	// Serialises changes to one channel (members, name, sends) until the transaction ends.
 	LockChannel(ctx context.Context, arg LockChannelParams) (Channel, error)
+	// The next project whose grace period is over, locked so that two workers never purge the same one.
+	LockDueTenantDeletion(ctx context.Context) (LockDueTenantDeletionRow, error)
 	// The oldest unpublished events, locked for this transaction. Another worker skips them instead of waiting, so any
 	// number of workers can run (PLAN D7). Only the partial index on unpublished rows is scanned.
 	LockOutboxBatch(ctx context.Context, limit int32) ([]LockOutboxBatchRow, error)
@@ -140,15 +151,27 @@ type Querier interface {
 	MarkRead(ctx context.Context, arg MarkReadParams) (int64, error)
 	// Oldest admin, else the oldest member.
 	PickNextOwner(ctx context.Context, arg PickNextOwnerParams) (uuid.UUID, error)
+	// Per day (UTC) over the last N days, today included: new accounts, new projects, messages sent and people who sent
+	// one (system messages are not counted).
+	PlatformDailySeries(ctx context.Context, days int32) ([]PlatformDailySeriesRow, error)
 	PlatformUsage(ctx context.Context) (PlatformUsageRow, error)
+	PurgeTenantAttachments(ctx context.Context, tenantID uuid.UUID) error
+	// Everything of a tenant, in an order the foreign keys accept. Channels take their members, messages, reactions and
+	// message attachments with them (ON DELETE CASCADE).
+	PurgeTenantChannels(ctx context.Context, tenantID uuid.UUID) error
+	PurgeTenantDevices(ctx context.Context, tenantID uuid.UUID) error
+	PurgeTenantOutbox(ctx context.Context, tenantID uuid.UUID) error
+	PurgeTenantUsers(ctx context.Context, tenantID uuid.UUID) error
 	RemoveMember(ctx context.Context, arg RemoveMemberParams) (int64, error)
 	ReviseMessage(ctx context.Context, arg ReviseMessageParams) error
 	// A tombstone keeps the place of the message and nothing of its content.
 	ReviseMessageDeleted(ctx context.Context, arg ReviseMessageDeletedParams) error
 	ReviseMessageText(ctx context.Context, arg ReviseMessageTextParams) error
+	// Switches the project off and sets when it goes for good. A project already scheduled keeps its date.
+	ScheduleTenantDeletion(ctx context.Context, arg ScheduleTenantDeletionParams) (Tenant, error)
 	SetAccountDisabled(ctx context.Context, arg SetAccountDisabledParams) (Account, error)
 	SetAccountEmailVerified(ctx context.Context, id uuid.UUID) error
-	SetAccountPlatformAdmin(ctx context.Context, arg SetAccountPlatformAdminParams) (int64, error)
+	SetAccountPlatformAdmin(ctx context.Context, arg SetAccountPlatformAdminParams) (uuid.UUID, error)
 	SetAttachmentStatus(ctx context.Context, arg SetAttachmentStatusParams) error
 	SetChannelFrozen(ctx context.Context, arg SetChannelFrozenParams) (int64, error)
 	SetMemberRole(ctx context.Context, arg SetMemberRoleParams) error
@@ -158,6 +181,8 @@ type Querier interface {
 	SyncMessages(ctx context.Context, arg SyncMessagesParams) ([]MessageDetail, error)
 	// Usage of one tenant. Messages: the sum of the per channel counters of messages (cheap, no scan).
 	TenantUsage(ctx context.Context, forTenant uuid.UUID) (TenantUsageRow, error)
+	// The projects that sent the most messages since a time.
+	TopTenantsByMessages(ctx context.Context, arg TopTenantsByMessagesParams) ([]TopTenantsByMessagesRow, error)
 	TouchSession(ctx context.Context, arg TouchSessionParams) error
 	// Keeps the most recently registered tokens of a user: old phones that never unregistered must not pile up.
 	TrimDevicesOfUser(ctx context.Context, arg TrimDevicesOfUserParams) error

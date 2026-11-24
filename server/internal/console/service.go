@@ -50,6 +50,8 @@ const (
 	CodeProjectLimit       = "project_limit_reached"
 	CodeWrongPassword      = "wrong_password"
 	CodeAccountDisabled    = "account_disabled"
+	CodeRegistrationClosed = "registration_closed"
+	CodeDeletionScheduled  = "deletion_scheduled"
 )
 
 // Limiter is ratelimit.Limiter.
@@ -64,6 +66,10 @@ type Options struct {
 	MaxProjects int
 	// Captcha checks sign up and password reset requests (PLAN D72). Nil: no check.
 	Captcha Captcha
+	// RegistrationClosed refuses new accounts (a switch for when there is abuse). Existing accounts sign in as usual.
+	RegistrationClosed bool
+	// DeletionGrace is how long a deleted project can still be restored before the worker removes it (PLAN D75).
+	DeletionGrace time.Duration
 }
 
 type Service struct {
@@ -81,6 +87,9 @@ func NewService(q store.Querier, tenants *tenant.Service, mailer Mailer, limiter
 		opts.MaxProjects = 3
 	}
 	opts.BaseURL = strings.TrimRight(opts.BaseURL, "/")
+	if opts.DeletionGrace <= 0 {
+		opts.DeletionGrace = 72 * time.Hour
+	}
 	return &Service{q: q, tenants: tenants, mailer: mailer, limiter: limiter, log: log.With("subsystem", "console"), opts: opts, now: time.Now}
 }
 
@@ -201,6 +210,9 @@ func (s *Service) link(path string, token string) string {
 // check comes after the cheap checks, so that a typo does not cost the visitor another check, and after the limit, so
 // that a flood is not passed on to Cloudflare.
 func (s *Service) Register(ctx context.Context, rawEmail, password, rawName, captcha string, c Caller) error {
+	if s.opts.RegistrationClosed {
+		return httpx.NewError(403, CodeRegistrationClosed, "sign up is closed for now")
+	}
 	email, err := normalizeEmail(rawEmail)
 	if err != nil {
 		return err
@@ -772,6 +784,9 @@ func (s *Service) SetProjectDisabled(ctx context.Context, p Principal, id uuid.U
 	if err != nil {
 		return store.Tenant{}, err
 	}
+	if !disabled && row.DeleteAfter != nil {
+		return store.Tenant{}, errDeletionScheduled
+	}
 	if err := s.confirm(ctx, p, password, c); err != nil {
 		return store.Tenant{}, err
 	}
@@ -805,11 +820,12 @@ func requireAdmin(p Principal) error {
 	return nil
 }
 
-func (s *Service) AdminAccounts(ctx context.Context, p Principal, after uuid.UUID, limit int) ([]store.Account, error) {
+// AdminAccounts pages the accounts in id order; search, when given, keeps those whose e-mail or name contains it.
+func (s *Service) AdminAccounts(ctx context.Context, p Principal, search string, after uuid.UUID, limit int) ([]store.Account, error) {
 	if err := requireAdmin(p); err != nil {
 		return nil, err
 	}
-	rows, err := s.q.ListAccounts(ctx, store.ListAccountsParams{After: after, MaxRows: clampRows(limit)})
+	rows, err := s.q.ListAccounts(ctx, store.ListAccountsParams{After: after, Pattern: likePattern(search), MaxRows: clampRows(limit)})
 	if err != nil {
 		return nil, fmt.Errorf("console: accounts: %w", err)
 	}
@@ -872,6 +888,9 @@ func (s *Service) AdminSetProjectDisabled(ctx context.Context, p Principal, id u
 	if err != nil {
 		return AdminProject{}, fmt.Errorf("console: project: %w", err)
 	}
+	if !disabled && row.Tenant.DeleteAfter != nil {
+		return AdminProject{}, errDeletionScheduled
+	}
 	if err := s.tenants.SetDisabled(ctx, row.Tenant.Slug, disabled); err != nil {
 		return AdminProject{}, err
 	}
@@ -928,14 +947,21 @@ func (s *Service) CleanSessions(ctx context.Context, every time.Duration) {
 }
 
 // PromoteAdmin makes the account with this e-mail a platform administrator (CLI only: there is no API for it).
+// PromoteAdmin makes an account a platform administrator, or takes it away (the CLI, PLAN D66). It is written in the
+// account's security log; a session open in the admin app loses its rights at its next request.
 func (s *Service) PromoteAdmin(ctx context.Context, email string, admin bool) error {
-	n, err := s.q.SetAccountPlatformAdmin(ctx, store.SetAccountPlatformAdminParams{Admin: admin, Email: email})
+	id, err := s.q.SetAccountPlatformAdmin(ctx, store.SetAccountPlatformAdminParams{Admin: admin, Email: email})
+	if errors.Is(err, pgx.ErrNoRows) {
+		return fmt.Errorf("console: no account with e-mail %s", email)
+	}
 	if err != nil {
 		return fmt.Errorf("console: promote: %w", err)
 	}
-	if n == 0 {
-		return fmt.Errorf("console: no account with e-mail %s", email)
+	action := "demoted_from_admin"
+	if admin {
+		action = "promoted_to_admin"
 	}
+	s.audit(ctx, id, action, nil, Caller{IP: "cli"})
 	return nil
 }
 
