@@ -61,11 +61,31 @@ type Tenant struct {
 func (t Tenant) Disabled() bool { return t.DisabledAt != nil }
 
 type Service struct {
-	q   store.Querier
-	box *secretbox.Box
+	q      store.Querier
+	box    *secretbox.Box
+	notify Notifier
+}
+
+// Notifier tells the running API pods that a tenant changed, so that they stop trusting what they cached about it
+// (and close its WebSockets when it was switched off) at once instead of within the cache TTL.
+type Notifier interface {
+	TenantChanged(ctx context.Context, tenantID uuid.UUID, disabled bool) error
 }
 
 func NewService(q store.Querier, box *secretbox.Box) *Service { return &Service{q: q, box: box} }
+
+// WithNotifier makes the service announce its changes. Without one (the CLI), pods see them within the cache TTL.
+func (s *Service) WithNotifier(n Notifier) *Service {
+	s.notify = n
+	return s
+}
+
+// announce is best effort: the change is stored, and the cache TTL is the fallback when Redis cannot be reached.
+func (s *Service) announce(ctx context.Context, id uuid.UUID, disabled bool) {
+	if s.notify != nil {
+		_ = s.notify.TenantChanged(ctx, id, disabled)
+	}
+}
 
 func secretContext(id uuid.UUID, field string) string { return "tenant/" + id.String() + "/" + field }
 
@@ -165,8 +185,8 @@ func (s *Service) Secret(t Tenant) ([]byte, error) {
 	return s.box.Open(t.apiSecretEnc, secretContext(t.ID, "api_secret"))
 }
 
-// RotateSecret replaces the api secret at once: tokens signed with the old one stop working within the
-// authentication cache TTL. The tenant backend must switch to the new secret right after.
+// RotateSecret replaces the api secret at once: with a notifier, new requests signed with the old one are refused right
+// away (otherwise within the authentication cache TTL). The tenant backend must switch to the new secret right after.
 func (s *Service) RotateSecret(ctx context.Context, slug string) (string, error) {
 	t, err := s.GetBySlug(ctx, slug)
 	if err != nil {
@@ -179,6 +199,7 @@ func (s *Service) RotateSecret(ctx context.Context, slug string) (string, error)
 	}); err != nil {
 		return "", fmt.Errorf("tenant: rotate secret: %w", err)
 	}
+	s.announce(ctx, t.ID, false)
 	return secret, nil
 }
 
@@ -217,6 +238,7 @@ func (s *Service) SetConfig(ctx context.Context, slug string, cfg Config) error 
 	if _, err := s.q.UpdateTenantConfig(ctx, store.UpdateTenantConfigParams{ID: t.ID, Config: string(b)}); err != nil {
 		return fmt.Errorf("tenant: set config: %w", err)
 	}
+	s.announce(ctx, t.ID, false)
 	return nil
 }
 
@@ -228,6 +250,7 @@ func (s *Service) SetDisabled(ctx context.Context, slug string, disabled bool) e
 	if _, err := s.q.SetTenantDisabled(ctx, store.SetTenantDisabledParams{ID: t.ID, Disabled: disabled}); err != nil {
 		return fmt.Errorf("tenant: set disabled: %w", err)
 	}
+	s.announce(ctx, t.ID, disabled)
 	return nil
 }
 

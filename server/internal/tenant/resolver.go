@@ -5,6 +5,8 @@ import (
 	"errors"
 	"sync"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // CredentialsLoader is Service.Credentials; an interface so the cache can be tested without a database.
@@ -40,6 +42,18 @@ func NewResolver(load CredentialsLoader) *Resolver {
 		maxEntries:  10_000,
 		now:         time.Now,
 		entries:     make(map[string]cacheEntry),
+	}
+}
+
+// ForgetTenant drops what is cached about a tenant, and every "unknown key" answer (a key that was refused while its
+// tenant was off is accepted again at once when it is switched back on). Called when any pod announces a change.
+func (r *Resolver) ForgetTenant(id uuid.UUID) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for key, e := range r.entries {
+		if e.err != nil || e.tenant.ID == id {
+			delete(r.entries, key)
+		}
 	}
 }
 

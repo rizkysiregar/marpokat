@@ -15,6 +15,7 @@ import (
 	"github.com/rizkysiregar/marpokat/server/internal/platform/ratelimit"
 	"github.com/rizkysiregar/marpokat/server/internal/platform/redisx"
 	"github.com/rizkysiregar/marpokat/server/internal/platform/secretbox"
+	"github.com/rizkysiregar/marpokat/server/internal/realtime"
 	"github.com/rizkysiregar/marpokat/server/internal/store"
 	"github.com/rizkysiregar/marpokat/server/internal/tenant"
 )
@@ -42,7 +43,9 @@ func newConsole(cfg config.Console, pool *pgxpool.Pool, rdb *redisx.Client, box 
 	if len(admin) == 0 {
 		log.Info("console: CONSOLE_ADMIN_ORIGINS is not set, nobody can sign in to the admin app")
 	}
-	svc := console.NewService(q, tenant.NewService(q, box), mailer, ratelimit.New(rdb, log), log,
+	// changes made on the website (switch off, delete, rotate, settings) reach every API pod at once (PLAN D77)
+	tenants := tenant.NewService(q, box).WithNotifier(realtime.NewTenantNotifier(rdb))
+	svc := console.NewService(q, tenants, mailer, ratelimit.New(rdb, log), log,
 		console.Options{BaseURL: cfg.BaseURL, MaxProjects: cfg.MaxProjects, Captcha: captcha,
 			RegistrationClosed: !cfg.RegistrationOpen, DeletionGrace: cfg.DeletionGrace})
 	handler := console.NewHandler(svc, console.HandlerOptions{PortalOrigins: portal, AdminOrigins: admin, TrustedProxies: proxies}, log).Routes()

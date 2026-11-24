@@ -51,6 +51,9 @@ func PublicRoutes(d Deps) http.Handler {
 	tenants := tenant.NewService(store.New(d.Pool), d.Box)
 	users := user.NewService(d.Pool)
 	resolver := tenant.NewResolver(tenants.Credentials)
+	if d.Hub != nil { // a tenant switched off or changed anywhere: this pod's cache forgets it at once
+		d.Hub.OnTenantChanged(resolver.ForgetTenant)
+	}
 	lookup := userLookup(users)
 	mw := auth.NewMiddleware(resolver, lookup, d.Log)
 	channels := channel.NewService(d.Pool)
