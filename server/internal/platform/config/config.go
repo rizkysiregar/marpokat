@@ -134,6 +134,10 @@ type Console struct {
 	TurnstileSecretKey string `env:"TURNSTILE_SECRET_KEY"`
 	TurnstileVerifyURL string `env:"TURNSTILE_VERIFY_URL" envDefault:"https://challenges.cloudflare.com/turnstile/v0/siteverify"`
 	MaxProjects        int    `env:"CONSOLE_MAX_PROJECTS" envDefault:"3"`
+	// RegistrationOpen: false closes sign up (existing accounts are not affected). A switch for when there is abuse.
+	RegistrationOpen bool `env:"CONSOLE_REGISTRATION_OPEN" envDefault:"true"`
+	// DeletionGrace is how long a deleted project can be restored before the worker removes it (PLAN D75).
+	DeletionGrace time.Duration `env:"CONSOLE_DELETION_GRACE" envDefault:"72h"`
 
 	// MailDriver is "log" (prints the e-mail, development) or "smtp".
 	MailDriver   string `env:"MAIL_DRIVER" envDefault:"log"`
@@ -173,6 +177,9 @@ func (c Console) Validate() error {
 	}
 	if _, err := c.TrustedProxyPrefixes(); err != nil {
 		return err
+	}
+	if c.DeletionGrace < time.Hour {
+		return fmt.Errorf("CONSOLE_DELETION_GRACE must be at least 1h, got %s: a deleted project needs time to be restored", c.DeletionGrace)
 	}
 	if c.TurnstileSecretKey != "" {
 		if v, err := url.Parse(c.TurnstileVerifyURL); err != nil || v.Scheme != "https" && v.Scheme != "http" || v.Host == "" {

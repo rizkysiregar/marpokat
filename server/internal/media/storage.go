@@ -111,6 +111,43 @@ func (s *Storage) Remove(ctx context.Context, key string) error {
 	return nil
 }
 
+// RemovePrefix deletes every object whose key starts with prefix (all the files of a tenant: "<tenant id>/") and says
+// how many there were. The first failure is returned after the rest were tried.
+func (s *Storage) RemovePrefix(ctx context.Context, prefix string) (int, error) {
+	if prefix == "" || !strings.HasSuffix(prefix, "/") {
+		return 0, fmt.Errorf("media: refusing to remove the prefix %q", prefix)
+	}
+	toRemove := make(chan minio.ObjectInfo)
+	var listErr error
+	n := 0
+	go func() {
+		defer close(toRemove)
+		for o := range s.client.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true}) {
+			if o.Err != nil {
+				listErr = o.Err
+				return
+			}
+			n++
+			select {
+			case toRemove <- o:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	var firstErr error
+	for e := range s.client.RemoveObjects(ctx, s.bucket, toRemove, minio.RemoveObjectsOptions{}) {
+		if e.Err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("media: remove %s: %w", e.ObjectName, e.Err)
+		}
+	}
+	// RemoveObjects has drained toRemove, which the lister closed after its last write
+	if listErr != nil {
+		return n, fmt.Errorf("media: list %s: %w", prefix, listErr)
+	}
+	return n, firstErr
+}
+
 // contentDisposition builds "attachment; filename=...; filename*=..." for a file name that came from a user: anything
 // that could end the header or the quoted string is dropped from the plain form, and the UTF-8 form is escaped.
 func contentDisposition(name string) string {

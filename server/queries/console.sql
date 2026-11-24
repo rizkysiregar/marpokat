@@ -24,11 +24,16 @@ SET disabled_at = CASE WHEN sqlc.arg(disabled)::boolean THEN coalesce(disabled_a
 WHERE id = sqlc.arg(id)
 RETURNING *;
 
--- name: SetAccountPlatformAdmin :execrows
-UPDATE accounts SET is_platform_admin = sqlc.arg(admin)::boolean WHERE lower(email) = lower(sqlc.arg(email));
+-- name: SetAccountPlatformAdmin :one
+UPDATE accounts SET is_platform_admin = sqlc.arg(admin)::boolean WHERE lower(email) = lower(sqlc.arg(email)) RETURNING id;
 
+-- Accounts in id order, optionally only those whose e-mail or name contains the search (an ILIKE pattern, escaped).
 -- name: ListAccounts :many
-SELECT * FROM accounts WHERE id > sqlc.arg(after)::uuid ORDER BY id LIMIT sqlc.arg(max_rows);
+SELECT * FROM accounts
+WHERE id > sqlc.arg(after)::uuid
+  AND (sqlc.arg(pattern)::text = '' OR email ILIKE sqlc.arg(pattern)::text OR name ILIKE sqlc.arg(pattern)::text)
+ORDER BY id
+LIMIT sqlc.arg(max_rows);
 
 -- name: CountAccounts :one
 SELECT count(*) FROM accounts;
@@ -64,6 +69,9 @@ DELETE FROM console_sessions WHERE id = $1;
 -- name: DeleteAccountSessions :exec
 DELETE FROM console_sessions WHERE account_id = $1;
 
+-- name: DeleteSessionOfAccount :execrows
+DELETE FROM console_sessions WHERE id = $1 AND account_id = $2;
+
 -- name: DeleteOtherSessions :exec
 DELETE FROM console_sessions WHERE account_id = $1 AND id <> $2;
 
@@ -87,8 +95,48 @@ SELECT * FROM tenants WHERE account_id = $1 ORDER BY created_at;
 -- name: GetTenantOfAccount :one
 SELECT * FROM tenants WHERE id = $1 AND account_id = $2;
 
+-- A project waiting to be deleted does not count against the limit.
 -- name: CountTenantsOfAccount :one
-SELECT count(*) FROM tenants WHERE account_id = $1;
+SELECT count(*) FROM tenants WHERE account_id = $1 AND delete_after IS NULL;
+
+-- Switches the project off and sets when it goes for good. A project already scheduled keeps its date.
+-- name: ScheduleTenantDeletion :one
+UPDATE tenants
+SET delete_after = coalesce(delete_after, sqlc.arg(delete_after)::timestamptz), disabled_at = coalesce(disabled_at, now())
+WHERE id = sqlc.arg(id)
+RETURNING *;
+
+-- Restoring keeps the project switched off: the owner switches it on when ready.
+-- name: CancelTenantDeletion :one
+UPDATE tenants SET delete_after = NULL WHERE id = $1 RETURNING *;
+
+-- The next project whose grace period is over, locked so that two workers never purge the same one.
+-- name: LockDueTenantDeletion :one
+SELECT id, slug, account_id FROM tenants
+WHERE delete_after IS NOT NULL AND delete_after <= now()
+ORDER BY delete_after
+LIMIT 1
+FOR UPDATE SKIP LOCKED;
+
+-- Everything of a tenant, in an order the foreign keys accept. Channels take their members, messages, reactions and
+-- message attachments with them (ON DELETE CASCADE).
+-- name: PurgeTenantChannels :exec
+DELETE FROM channels WHERE tenant_id = $1;
+
+-- name: PurgeTenantAttachments :exec
+DELETE FROM attachments WHERE tenant_id = $1;
+
+-- name: PurgeTenantDevices :exec
+DELETE FROM devices WHERE tenant_id = $1;
+
+-- name: PurgeTenantOutbox :exec
+DELETE FROM outbox WHERE tenant_id = $1;
+
+-- name: PurgeTenantUsers :exec
+DELETE FROM users WHERE tenant_id = $1;
+
+-- name: DeleteTenantRow :exec
+DELETE FROM tenants WHERE id = $1;
 
 -- name: ListAllTenantsWithOwner :many
 SELECT sqlc.embed(t), a.email AS owner_email
@@ -115,3 +163,54 @@ SELECT
     (SELECT count(*) FROM users u WHERE u.deleted_at IS NULL)::bigint AS users,
     (SELECT count(*) FROM channels)::bigint AS channels,
     (SELECT coalesce(sum(last_message_seq), 0) FROM channels)::bigint AS messages;
+
+-- The whole platform's audit log, newest first, with the e-mail of each account. Optional filters; the cursor is the id
+-- of the last event of the previous page.
+-- name: ListPlatformAudit :many
+SELECT sqlc.embed(e), a.email AS account_email
+FROM console_audit e JOIN accounts a ON a.id = e.account_id
+WHERE (sqlc.narg(action)::text IS NULL OR e.action = sqlc.narg(action)::text)
+  AND (sqlc.narg(account_id)::uuid IS NULL OR e.account_id = sqlc.narg(account_id)::uuid)
+  AND (sqlc.narg(before_id)::uuid IS NULL OR (e.created_at, e.id) < (
+        SELECT b.created_at, b.id FROM console_audit b WHERE b.id = sqlc.narg(before_id)::uuid))
+ORDER BY e.created_at DESC, e.id DESC
+LIMIT sqlc.arg(max_rows);
+
+-- Per day (UTC) over the last N days, today included: new accounts, new projects, messages sent and people who sent
+-- one (system messages are not counted).
+-- name: PlatformDailySeries :many
+WITH days AS (
+    SELECT generate_series(
+        date_trunc('day', now() AT TIME ZONE 'UTC') - (sqlc.arg(days)::int - 1) * interval '1 day',
+        date_trunc('day', now() AT TIME ZONE 'UTC'),
+        interval '1 day') AS day
+), since AS (SELECT min(day) AT TIME ZONE 'UTC' AS t FROM days),
+acc AS (
+    SELECT date_trunc('day', created_at AT TIME ZONE 'UTC') AS day, count(*) AS n
+    FROM accounts WHERE created_at >= (SELECT t FROM since) GROUP BY 1
+), prj AS (
+    SELECT date_trunc('day', created_at AT TIME ZONE 'UTC') AS day, count(*) AS n
+    FROM tenants WHERE created_at >= (SELECT t FROM since) GROUP BY 1
+), msg AS (
+    SELECT date_trunc('day', created_at AT TIME ZONE 'UTC') AS day, count(*) AS n, count(DISTINCT sender_id) AS senders
+    FROM messages WHERE created_at >= (SELECT t FROM since) AND type <> 'system' GROUP BY 1
+)
+SELECT to_char(days.day, 'YYYY-MM-DD') AS day,
+       coalesce(acc.n, 0)::bigint AS accounts,
+       coalesce(prj.n, 0)::bigint AS projects,
+       coalesce(msg.n, 0)::bigint AS messages,
+       coalesce(msg.senders, 0)::bigint AS active_users
+FROM days
+LEFT JOIN acc ON acc.day = days.day
+LEFT JOIN prj ON prj.day = days.day
+LEFT JOIN msg ON msg.day = days.day
+ORDER BY days.day;
+
+-- The projects that sent the most messages since a time.
+-- name: TopTenantsByMessages :many
+SELECT t.id, t.name, t.slug, count(*)::bigint AS messages
+FROM messages m JOIN tenants t ON t.id = m.tenant_id
+WHERE m.created_at >= sqlc.arg(since)::timestamptz AND m.type <> 'system'
+GROUP BY t.id, t.name, t.slug
+ORDER BY messages DESC
+LIMIT sqlc.arg(max_rows);

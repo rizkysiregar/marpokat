@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"mime"
 	"net"
@@ -72,6 +73,7 @@ func (h *Handler) Routes() http.Handler {
 	}
 	const v = "/console/v1"
 
+	mux.Handle("GET "+v+"/status", open(h.status))
 	mux.Handle("POST "+v+"/auth/register", open(h.register))
 	mux.Handle("POST "+v+"/auth/verify-email", open(h.verifyEmail))
 	mux.Handle("POST "+v+"/auth/resend-verification", authed(h.resendVerification))
@@ -84,11 +86,14 @@ func (h *Handler) Routes() http.Handler {
 	mux.Handle("PATCH "+v+"/me", authed(h.updateMe))
 	mux.Handle("PUT "+v+"/me/password", authed(h.changePassword))
 	mux.Handle("GET "+v+"/me/sessions", authed(h.listSessions))
+	mux.Handle("DELETE "+v+"/me/sessions/{session_id}", authed(h.endSession))
 	mux.Handle("GET "+v+"/me/audit", authed(h.listAudit))
 
 	mux.Handle("GET "+v+"/projects", authed(h.listProjects))
 	mux.Handle("POST "+v+"/projects", authed(h.createProject))
 	mux.Handle("GET "+v+"/projects/{project_id}", authed(h.getProject))
+	mux.Handle("DELETE "+v+"/projects/{project_id}", authed(h.deleteProject))
+	mux.Handle("POST "+v+"/projects/{project_id}/restore", authed(h.restoreProject))
 	mux.Handle("PATCH "+v+"/projects/{project_id}", authed(h.updateProject))
 	mux.Handle("POST "+v+"/projects/{project_id}/rotate-secret", authed(h.rotateSecret))
 	mux.Handle("GET "+v+"/projects/{project_id}/push", authed(h.getPush))
@@ -97,10 +102,15 @@ func (h *Handler) Routes() http.Handler {
 	mux.Handle("POST "+v+"/projects/{project_id}/disable", authed(h.setProjectDisabled))
 
 	mux.Handle("GET "+v+"/admin/accounts", authed(h.adminAccounts))
+	mux.Handle("GET "+v+"/admin/accounts/{account_id}", authed(h.adminAccount))
+	mux.Handle("POST "+v+"/admin/accounts/{account_id}/sign-out", authed(h.adminEndSessions))
 	mux.Handle("POST "+v+"/admin/accounts/{account_id}/disable", authed(h.adminSetAccountDisabled))
 	mux.Handle("GET "+v+"/admin/projects", authed(h.adminProjects))
+	mux.Handle("GET "+v+"/admin/projects/{project_id}", authed(h.adminProject))
 	mux.Handle("POST "+v+"/admin/projects/{project_id}/disable", authed(h.adminSetProjectDisabled))
 	mux.Handle("GET "+v+"/admin/stats", authed(h.adminStats))
+	mux.Handle("GET "+v+"/admin/stats/series", authed(h.adminSeries))
+	mux.Handle("GET "+v+"/admin/audit", authed(h.adminAudit))
 
 	return h.guard(mux)
 }
@@ -226,15 +236,16 @@ func accountOf(a store.Account) accountJSON {
 }
 
 type projectJSON struct {
-	ID                   uuid.UUID `json:"id"`
-	Slug                 string    `json:"slug"`
-	Name                 string    `json:"name"`
-	APIKey               string    `json:"api_key"`
-	ClientCanCreateDM    bool      `json:"client_can_create_dm"`
-	ClientCanCreateGroup bool      `json:"client_can_create_group"`
-	PushConfigured       bool      `json:"push_configured"`
-	Disabled             bool      `json:"disabled"`
-	CreatedAt            time.Time `json:"created_at"`
+	ID                   uuid.UUID  `json:"id"`
+	Slug                 string     `json:"slug"`
+	Name                 string     `json:"name"`
+	APIKey               string     `json:"api_key"`
+	ClientCanCreateDM    bool       `json:"client_can_create_dm"`
+	ClientCanCreateGroup bool       `json:"client_can_create_group"`
+	PushConfigured       bool       `json:"push_configured"`
+	Disabled             bool       `json:"disabled"`
+	DeleteAfter          *time.Time `json:"delete_after"`
+	CreatedAt            time.Time  `json:"created_at"`
 }
 
 func projectOf(t store.Tenant) projectJSON {
@@ -242,7 +253,7 @@ func projectOf(t store.Tenant) projectJSON {
 	_ = json.Unmarshal([]byte(t.Config), &cfg)
 	return projectJSON{ID: t.ID, Slug: t.Slug, Name: t.Name, APIKey: t.ApiKey,
 		ClientCanCreateDM: cfg.ClientCanCreateDM, ClientCanCreateGroup: cfg.ClientCanCreateGroup,
-		PushConfigured: len(t.FcmCredentialsEnc) > 0, Disabled: t.DisabledAt != nil, CreatedAt: t.CreatedAt}
+		PushConfigured: len(t.FcmCredentialsEnc) > 0, Disabled: t.DisabledAt != nil, DeleteAfter: t.DeleteAfter, CreatedAt: t.CreatedAt}
 }
 
 type pushJSON struct {
@@ -610,7 +621,7 @@ func (h *Handler) adminAccounts(w http.ResponseWriter, r *http.Request, p Princi
 			return
 		}
 	}
-	rows, err := h.svc.AdminAccounts(r.Context(), p, after, limit+1)
+	rows, err := h.svc.AdminAccounts(r.Context(), p, r.URL.Query().Get("q"), after, limit+1)
 	if err != nil {
 		h.fail(w, r, err)
 		return
@@ -692,4 +703,211 @@ func (h *Handler) adminStats(w http.ResponseWriter, r *http.Request, p Principal
 		"accounts": u.Accounts, "projects": u.Projects, "active_projects": u.ActiveProjects,
 		"users": u.Users, "channels": u.Channels, "messages": u.Messages,
 	})
+}
+
+// ---------------------------------------------------------------- status, deletion, sessions
+
+func (h *Handler) status(w http.ResponseWriter, _ *http.Request) {
+	httpx.WriteJSON(w, http.StatusOK, map[string]bool{"registration_open": h.svc.RegistrationOpen()})
+}
+
+func (h *Handler) deleteProject(w http.ResponseWriter, r *http.Request, p Principal) {
+	id, err := httpx.PathUUID(r, "project_id")
+	if err != nil {
+		h.fail(w, r, errProjectNotFound)
+		return
+	}
+	var in struct{ Password string }
+	if !httpx.DecodeJSON(w, r, &in) {
+		return
+	}
+	row, err := h.svc.DeleteProject(r.Context(), p, id, in.Password, h.caller(r))
+	if err != nil {
+		h.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusAccepted, projectOf(row))
+}
+
+func (h *Handler) restoreProject(w http.ResponseWriter, r *http.Request, p Principal) {
+	id, err := httpx.PathUUID(r, "project_id")
+	if err != nil {
+		h.fail(w, r, errProjectNotFound)
+		return
+	}
+	row, err := h.svc.RestoreProject(r.Context(), p, id, h.caller(r))
+	if err != nil {
+		h.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, projectOf(row))
+}
+
+func (h *Handler) endSession(w http.ResponseWriter, r *http.Request, p Principal) {
+	id, err := httpx.PathUUID(r, "session_id")
+	if err != nil {
+		h.fail(w, r, httpx.ErrNotFound("session not found"))
+		return
+	}
+	if err := h.svc.EndSession(r.Context(), p, id, h.caller(r)); err != nil {
+		h.fail(w, r, err)
+		return
+	}
+	if id == p.SessionID {
+		clearSessionCookie(w)
+	}
+	noContent(w)
+}
+
+// ---------------------------------------------------------------- platform admin: details, audit, charts
+
+type sessionJSON struct {
+	ID         uuid.UUID `json:"id"`
+	CreatedAt  time.Time `json:"created_at"`
+	LastSeenAt time.Time `json:"last_seen_at"`
+	UserAgent  string    `json:"user_agent"`
+	IP         string    `json:"ip"`
+	Scope      string    `json:"scope"`
+}
+
+type auditJSON struct {
+	ID           uuid.UUID `json:"id"`
+	Action       string    `json:"action"`
+	Target       *string   `json:"target"`
+	IP           string    `json:"ip"`
+	At           time.Time `json:"at"`
+	AccountID    uuid.UUID `json:"account_id,omitzero"`
+	AccountEmail string    `json:"account_email,omitempty"`
+}
+
+func (h *Handler) adminAccount(w http.ResponseWriter, r *http.Request, p Principal) {
+	id, err := httpx.PathUUID(r, "account_id")
+	if err != nil {
+		h.fail(w, r, errAccountNotFound)
+		return
+	}
+	v, err := h.svc.AdminAccount(r.Context(), p, id)
+	if err != nil {
+		h.fail(w, r, err)
+		return
+	}
+	projects := make([]projectJSON, len(v.Projects))
+	for i, t := range v.Projects {
+		projects[i] = projectOf(t)
+	}
+	sessions := make([]sessionJSON, len(v.Sessions))
+	for i, s := range v.Sessions {
+		sessions[i] = sessionJSON{s.ID, s.CreatedAt, s.LastSeenAt, s.UserAgent, s.Ip, s.Scope}
+	}
+	events := make([]auditJSON, len(v.Audit))
+	for i, e := range v.Audit {
+		events[i] = auditJSON{ID: e.ID, Action: e.Action, Target: e.Target, IP: e.Ip, At: e.CreatedAt}
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"account": accountOf(v.Account), "projects": projects, "sessions": sessions, "events": events,
+	})
+}
+
+func (h *Handler) adminEndSessions(w http.ResponseWriter, r *http.Request, p Principal) {
+	id, err := httpx.PathUUID(r, "account_id")
+	if err != nil {
+		h.fail(w, r, errAccountNotFound)
+		return
+	}
+	if err := h.svc.AdminEndSessions(r.Context(), p, id, h.caller(r)); err != nil {
+		h.fail(w, r, err)
+		return
+	}
+	noContent(w)
+}
+
+func (h *Handler) adminProject(w http.ResponseWriter, r *http.Request, p Principal) {
+	id, err := httpx.PathUUID(r, "project_id")
+	if err != nil {
+		h.fail(w, r, errProjectNotFound)
+		return
+	}
+	v, err := h.svc.AdminProject(r.Context(), p, id)
+	if err != nil {
+		h.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{
+		"project":  adminProjectJSON{projectOf(v.Project), v.OwnerEmail},
+		"owner_id": v.Project.AccountID,
+		"usage":    map[string]int64{"users": v.Usage.Users, "channels": v.Usage.Channels, "messages": v.Usage.Messages},
+		"push":     pushOf(v.Push),
+	})
+}
+
+func (h *Handler) adminAudit(w http.ResponseWriter, r *http.Request, p Principal) {
+	limit, err := httpx.QueryLimit(r, 50, 100)
+	if err != nil {
+		h.fail(w, r, err)
+		return
+	}
+	q := r.URL.Query()
+	f := AuditFilter{Action: q.Get("action")}
+	for name, dst := range map[string]*uuid.UUID{"account_id": &f.AccountID, "cursor": &f.Before} {
+		if raw := q.Get(name); raw != "" {
+			if *dst, err = uuid.Parse(raw); err != nil {
+				h.fail(w, r, httpx.FieldErrors{name: "is not an id this API gave"})
+				return
+			}
+		}
+	}
+	rows, err := h.svc.AdminAudit(r.Context(), p, f, limit+1)
+	if err != nil {
+		h.fail(w, r, err)
+		return
+	}
+	var next *string
+	if len(rows) > limit {
+		rows = rows[:limit]
+		c := rows[len(rows)-1].ConsoleAudit.ID.String()
+		next = &c
+	}
+	out := make([]auditJSON, len(rows))
+	for i, row := range rows {
+		e := row.ConsoleAudit
+		out[i] = auditJSON{e.ID, e.Action, e.Target, e.Ip, e.CreatedAt, e.AccountID, row.AccountEmail}
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"events": out, "next_cursor": next})
+}
+
+func (h *Handler) adminSeries(w http.ResponseWriter, r *http.Request, p Principal) {
+	days := 30
+	if raw := r.URL.Query().Get("days"); raw != "" {
+		if _, err := fmt.Sscanf(raw, "%d", &days); err != nil {
+			h.fail(w, r, httpx.FieldErrors{"days": "must be 7, 30 or 90"})
+			return
+		}
+	}
+	v, err := h.svc.AdminSeries(r.Context(), p, days)
+	if err != nil {
+		h.fail(w, r, err)
+		return
+	}
+	type day struct {
+		Day         string `json:"day"`
+		Accounts    int64  `json:"accounts"`
+		Projects    int64  `json:"projects"`
+		Messages    int64  `json:"messages"`
+		ActiveUsers int64  `json:"active_users"`
+	}
+	type top struct {
+		ID       uuid.UUID `json:"id"`
+		Name     string    `json:"name"`
+		Slug     string    `json:"slug"`
+		Messages int64     `json:"messages"`
+	}
+	ds := make([]day, len(v.Days))
+	for i, d := range v.Days {
+		ds[i] = day{d.Day, d.Accounts, d.Projects, d.Messages, d.ActiveUsers}
+	}
+	ts := make([]top, len(v.TopProjects))
+	for i, t := range v.TopProjects {
+		ts[i] = top{t.ID, t.Name, t.Slug, t.Messages}
+	}
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"days": ds, "top_projects": ts})
 }

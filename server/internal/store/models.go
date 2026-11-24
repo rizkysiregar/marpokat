@@ -189,6 +189,7 @@ type Tenant struct {
 	UpdatedAt         time.Time
 	DisabledAt        *time.Time
 	AccountID         uuid.NullUUID
+	DeleteAfter       *time.Time
 }
 
 type User struct {

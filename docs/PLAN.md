@@ -116,6 +116,8 @@ Legenda: ⚪ belum, 🟡 berjalan, ✅ selesai, ⛔ terblokir
 | D72 | **Turnstile diverifikasi Go** di `register` dan `forgot-password` (`TURNSTILE_SECRET_KEY`; `400 captcha_failed`, `503 captcha_unavailable` karena gagal tertutup bila Cloudflare tak terjangkau; mati bila kosong untuk pengembangan). Dicek setelah validasi input dan limit, supaya salah ketik tidak menghabiskan token dan banjir request tidak diteruskan ke Cloudflare. Frontend hanya menampilkan widget dan mengirim `turnstile_token` | Secret captcha tidak boleh di browser; robot yang memanggil API langsung tetap terhalang |
 | D73 | **Alamat pengunjung dibaca Go dari `CF-Connecting-IP`** hanya bila request datang dari proxy tepercaya (`CONSOLE_TRUSTED_PROXIES`, CIDR ingress; default rentang privat cluster), selain itu dari alamat koneksi. `X-Client-IP` dihapus bersama service key | Limit login/daftar dan audit tetap melihat orangnya, dan header tidak bisa dipalsukan dari luar |
 | D74 | **Stack website**: Vue 3 + TypeScript + Vite. Portal pakai **Nuxt 4 mode statis** (`nuxt generate`: landing dan docs di-prerender untuk SEO, `/app/**` hanya di browser), Tailwind 4 + tema Marpokat (`--mp-*`), docs ditulis Markdown (Nuxt Content); Reka UI ditambah saat komponen headless pertama dibutuhkan. Admin pakai **Quasar** (SPA, komponen tabel/form/dialog lengkap) dengan warna brand dari token Marpokat, tanpa Tailwind. Bersama: client bertipe dari `spec/console.yaml` (`openapi-typescript` + `openapi-fetch`), TanStack Query untuk data server, Pinia untuk sesi, Zod + composable kecil `useForm` untuk form (validasi di browser hanya kenyamanan, Go tetap penentu; VeeValidate batal karena adapter Zod-nya masih Zod 3), Vitest; Playwright menyusul. Node 24, TypeScript 5.9 (vue-tsc belum mendukung TS 7) | Portal butuh SEO dan tampilan khas brand; admin butuh banyak tabel dan form cepat. Dua sistem styling tidak dicampur dalam satu app. Client yang di-generate dari spec membuat perubahan kontrak ketahuan saat compile |
+| D75 | **Hapus proyek dengan masa tenggang 3 hari** (`CONSOLE_DELETION_GRACE`, minimal 1 jam). `DELETE /projects/{id}` (dengan password) langsung mematikan proyek dan mengisi `tenants.delete_after`; selama masa tenggang proyek bisa dipulihkan (tetap mati sampai dinyalakan), tidak dihitung dalam batas proyek, dan tidak bisa dinyalakan. Setelahnya worker (`tenant.Purger`, tiap 10 menit) menghapus semua file di MinIO dengan awalan `<tenant id>/`, lalu semua barisnya dalam satu transaksi (channel beserta member/pesan/reaction, lampiran, perangkat, outbox, user, tenant), terkunci `FOR UPDATE SKIP LOCKED`; pemilik mendapat `project_deleted` di log keamanannya | Salah klik tidak menghilangkan data pengguna pelanggan, tapi hak hapus (UU PDP) tetap terpenuhi. Gagal di tengah = rollback dan diulang ronde berikutnya |
+| D76 | **Admin membaca platform secara luas**: detail akun (proyek, sesi, audit) dan "keluarkan dari semua sesi", detail proyek (pemilik, pemakaian, push), log audit seluruh platform (filter aksi/akun, kursor), pencarian akun (`?q=`, ILIKE dengan wildcard di-escape), deret harian 7/30/90 hari (akun baru, proyek baru, pesan, pengirim aktif; UTC) dan 5 proyek tersibuk. Pesan per hari dihitung dengan indeks BRIN `messages(created_at)`. Promote/demote lewat CLI ikut tercatat di audit | Admin cukup dari satu tempat tanpa membuka database. BRIN kecil dan murah ditulis karena pesan masuk berurutan waktu |
 
 ---
 
@@ -597,19 +599,23 @@ Semua data dan aturan lewat Console API, yang dibuka ke browser secara same-orig
 - [x] `X-Console-Key`, `X-Client-IP`, dan `CONSOLE_SERVICE_KEY` dihapus (tanpa masa transisi: Laravel tidak pernah menyala di dev)
 - [x] `spec/console.yaml` 0.2.0: bagian "Not public" ditulis ulang (cookie, origin, scope, Turnstile), field `turnstile_token`, server URL publik
 - [x] Tes: unit (guard Origin/Content-Type, IP dari proxy tepercaya vs tidak, atribut cookie, Turnstile dengan Cloudflare palsu termasuk tidak terjangkau, config) dan integrasi (cookie login/logout/sesi berakhir, request lintas situs, scope admin, Turnstile)
+- [x] Hapus proyek dengan masa tenggang + pulihkan, purge di worker termasuk file MinIO (D75); tes isolasi: proyek lain dari akun yang sama tidak tersentuh
+- [x] API admin luas (D76): detail akun/proyek, keluarkan sesi, audit platform, pencarian, deret harian + proyek tersibuk; audit promote/demote
+- [x] `DELETE /me/sessions/{id}` (keluarkan satu perangkat), saklar `CONSOLE_REGISTRATION_OPEN` + `GET /status`
+- [x] `spec/console.yaml` 0.3.0
 
 **Frontend (repo `marpokat-web`, D74):**
 
 - [x] Monorepo pnpm: `apps/portal`, `apps/admin`, `packages/console-client` (generate dari `spec/console.yaml`), `packages/theme` (port `marpokat-theme.css` + uji kontras) (marpokat-web#3)
 - [x] Portal: landing, Terms, Privacy (draft), docs (getting started, push, batas). Docs lanjutan (server API, SDK JS/Android lebih rinci) menyusul
 - [x] Portal: daftar (Turnstile), masuk, lupa/reset password, konfirmasi e-mail, kirim ulang verifikasi
-- [ ] Portal: proyek (buat dan daftar selesai, secret tampil sekali; sisa: detail, rotasi, kredensial push, pengaturan, matikan), akun (profil, password, sesi, audit)
-- [ ] Admin: masuk, statistik, daftar akun (paging, nonaktifkan), daftar proyek (cari, nonaktifkan) selesai; sisa: audit
+- [x] Portal: proyek (buat, daftar, detail, rotasi secret, kredensial push, izin klien, matikan/nyalakan), akun (profil, password, sesi, aktivitas) (marpokat-web#4). Sisa di portal: tombol hapus/pulihkan, keluarkan satu sesi, halaman daftar saat pendaftaran ditutup
+- [ ] Admin: masuk, statistik, daftar akun (paging, nonaktifkan), daftar proyek (cari, nonaktifkan) selesai; sisa: dashboard dengan chart, detail akun/proyek, audit platform, pencarian (API sudah ada, D76)
 - [x] Image nginx statis per app (UID 10001, read-only, CSP tanpa `unsafe-inline` dengan hash yang dihitung saat build, `frame-ancestors 'none'`, halaman `no-cache`, `config.json` `no-store`, aset ber-hash cache 1 tahun, `/healthz`)
 - [x] Tes: Vitest (69 tes), ESLint + Prettier + type check di image `test`; e2e di Chrome headless terhadap container dan Console API lokal (18 langkah, tanpa error console/CSP), dijalankan manual
 - [ ] Playwright di CI untuk alur utama portal dan admin
 - [x] Jenkinsfile (lint, typecheck, test, build dua image `marpokat-portal` dan `marpokat-admin`, tulis tag keduanya ke gitops)
-- [ ] Menutup pendaftaran (dulu `REGISTRATION_OPEN` di Laravel, hanya di frontend): jadi saklar di server (`CONSOLE_REGISTRATION_OPEN`), portal membaca statusnya
+- [ ] Menutup pendaftaran: saklar server `CONSOLE_REGISTRATION_OPEN` + `GET /status` selesai; sisa: portal membaca statusnya
 
 **Gitops dan dev:**
 
@@ -683,3 +689,4 @@ kemungkinan untuk semuanya.
 | 2026-11-23 | Pengembangan MVP ditutup: chat diuji di Narrativ web + Android dev. M8: manifest prod `apps/marpokat` disiapkan |
 | 2026-11-24 | M9 diubah: Laravel dihentikan, website menjadi dua app Vue murni frontend (portal + admin). D62/D63 diganti, D68–D74 ditambahkan, stack website di bagian 3, diagram website di bagian 4, tugas M9 ditulis ulang. Console API untuk browser selesai di Go (cookie, Origin, scope admin, Turnstile, IP) |
 | 2026-11-24 | M9: gitops portal + admin (homelabs-gitops#18), monorepo Vue (marpokat-web#3). D71: host admin publik tanpa Cloudflare Access. D74: VeeValidate diganti `useForm` + Zod, Reka UI dan Playwright menyusul, Node 24 / TS 5.9 |
+| 2026-11-24 | D75 (hapus proyek dengan masa tenggang 3 hari, purge di worker), D76 (API admin luas, chart harian, audit platform). Console API 0.3.0 |

@@ -43,7 +43,8 @@ func newConsole(cfg config.Console, pool *pgxpool.Pool, rdb *redisx.Client, box 
 		log.Info("console: CONSOLE_ADMIN_ORIGINS is not set, nobody can sign in to the admin app")
 	}
 	svc := console.NewService(q, tenant.NewService(q, box), mailer, ratelimit.New(rdb, log), log,
-		console.Options{BaseURL: cfg.BaseURL, MaxProjects: cfg.MaxProjects, Captcha: captcha})
+		console.Options{BaseURL: cfg.BaseURL, MaxProjects: cfg.MaxProjects, Captcha: captcha,
+			RegistrationClosed: !cfg.RegistrationOpen, DeletionGrace: cfg.DeletionGrace})
 	handler := console.NewHandler(svc, console.HandlerOptions{PortalOrigins: portal, AdminOrigins: admin, TrustedProxies: proxies}, log).Routes()
 	server := httpx.NewServer(cfg.Addr, httpx.Chain(handler,
 		httpx.WithRequestID(),
