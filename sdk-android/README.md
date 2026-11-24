@@ -31,7 +31,8 @@ client.incoming.collect { e -> if (!e.isOpen) showBanner(e.channel, e.message) }
 ```
 
 Push (FCM): register the token with `client.registerPushToken(token)` on login and in `onNewToken`, remove it on
-logout with `unregisterPushToken`. In `onMessageReceived` use `MarpokatPush.parse(message.data)` to get a typed
+logout with `unregisterPushToken` (before `reset()`). It can be called before `connect()`: the client keeps the token,
+retries while the server cannot be reached and sends it again on the first connection of every day. In `onMessageReceived` use `MarpokatPush.parse(message.data)` to get a typed
 `PushMessage` (`null` for pushes that are not Marpokat's); `push.channelId` is what the notification opens.
 
 The client keeps the rules of `spec/events.md`: auth in the first frame, ping, `rev_seq` cursor with gap detection,

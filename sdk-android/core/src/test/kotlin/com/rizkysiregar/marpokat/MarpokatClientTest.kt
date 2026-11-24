@@ -16,6 +16,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import org.junit.After
 import org.junit.Before
 import org.junit.Test
+import java.io.IOException
 import java.net.URI
 
 private const val CH = "ch-1"
@@ -51,6 +52,9 @@ private class Fake : HttpTransport, SocketFactory {
     var expireOnce = false
     var channels = listOf(channel())
     var tokensSeen = mutableListOf<String>()
+    /** Answers to POST /v1/devices, in order (a lambda may throw, like a network failure); 204 once they run out. */
+    val deviceReplies = ArrayDeque<() -> HttpReply>()
+    fun devicePosts() = calls.count { it == "POST /v1/devices" }
 
     override fun open(url: String, listener: SocketListener): Socket =
         FakeSocket(listener).also { sockets += it; listener.onOpen() }
@@ -81,7 +85,8 @@ private class Fake : HttpTransport, SocketFactory {
             }
             key == "POST /v1/attachments" -> HttpReply(201, """{"attachment":{"id":"att1","kind":"image"},"upload_url":"https://files.test/put","upload_headers":{"Content-Type":"image/png"},"expires_at":""}""")
             key == "POST /v1/attachments/att1/complete" -> HttpReply(200, """{"id":"att1","kind":"image","status":"processing"}""")
-            key == "POST /v1/devices" || key.startsWith("DELETE /v1/devices/") -> HttpReply(204, "")
+            key == "POST /v1/devices" -> deviceReplies.removeFirstOrNull()?.invoke() ?: HttpReply(204, "")
+            key.startsWith("DELETE /v1/devices/") -> HttpReply(204, "")
             else -> HttpReply(404, """{"error":{"code":"not_found","message":"$key"}}""")
         }
     }
@@ -325,6 +330,72 @@ class MarpokatClientTest {
         start()
         client.registerPushToken("fcm token/1"); client.unregisterPushToken("fcm token/1")
         assertThat(fake.calls).containsAtLeast("POST /v1/devices", "DELETE /v1/devices/fcm%20token%2F1")
+    }
+
+    @Test fun registersAPushTokenBeforeTheFirstConnectionWithATokenFromTheProvider() = runClientTest {
+        tokens += "first"
+        newClient()
+        client.registerPushToken("fcm1") // the app may do this before connect() ran, as it is started elsewhere
+        assertThat(fake.calls).containsExactly("POST /v1/devices")
+        assertThat(fake.tokensSeen).containsExactly("Bearer first") // never an empty bearer
+    }
+
+    @Test fun retriesAPushTokenWithBackoffWhileTheServerCannotBeReached() = runClientTest {
+        newClient()
+        fake.deviceReplies += listOf({ throw IOException("offline") }, { HttpReply(503, """{"error":{"code":"unavailable","message":"down"}}""") })
+        client.registerPushToken("fcm1") // does not throw: the client keeps the token
+        assertThat(fake.devicePosts()).isEqualTo(1)
+        advanceTimeBy(101); runCurrent()
+        assertThat(fake.devicePosts()).isEqualTo(2) // after 100 ms
+        advanceTimeBy(150); runCurrent()
+        assertThat(fake.devicePosts()).isEqualTo(2)
+        advanceTimeBy(60); runCurrent()
+        assertThat(fake.devicePosts()).isEqualTo(3) // after 200 ms, and it is accepted
+        advanceTimeBy(3_600_000); runCurrent()
+        assertThat(fake.devicePosts()).isEqualTo(3)
+    }
+
+    @Test fun keepsAPushTokenRefusedForItsCredentialsUntilTheNextConnection() = runClientTest {
+        newClient()
+        fake.deviceReplies += { HttpReply(401, """{"error":{"code":"unauthenticated","message":"bad token"}}""") }
+        client.registerPushToken("fcm1")
+        advanceTimeBy(3_600_000); runCurrent()
+        assertThat(fake.devicePosts()).isEqualTo(1) // no asking again and again with credentials that do not work
+        client.connect(); runCurrent()
+        fake.sockets.last().push("auth.ok", """{"user":$me,"heartbeat_interval_ms":25000}"""); runCurrent()
+        assertThat(fake.devicePosts()).isEqualTo(2)
+    }
+
+    @Test fun sendsAnAcceptedPushTokenAgainOnceADayNotOnEveryReconnect() = runClientTest {
+        val ws = start()
+        client.registerPushToken("fcm1")
+        ws.listener.onClosed(1006); advanceTimeBy(101); runCurrent()
+        fake.sockets[1].push("auth.ok", """{"user":$me,"heartbeat_interval_ms":25000}"""); runCurrent()
+        assertThat(fake.devicePosts()).isEqualTo(1)
+        advanceTimeBy(24 * 3_600_000L); runCurrent()
+        fake.sockets[1].listener.onClosed(1006); advanceTimeBy(101); runCurrent()
+        fake.sockets[2].push("auth.ok", """{"user":$me,"heartbeat_interval_ms":25000}"""); runCurrent()
+        assertThat(fake.devicePosts()).isEqualTo(2)
+    }
+
+    @Test fun throwsAndForgetsAPushTokenTheServerRefuses() = runClientTest {
+        val ws = start()
+        fake.deviceReplies += { HttpReply(400, """{"error":{"code":"validation_failed","message":"push_token"}}""") }
+        val error = runCatching { client.registerPushToken("bad token") }.exceptionOrNull()
+        assertThat((error as MarpokatException).status).isEqualTo(400)
+        ws.listener.onClosed(1006); advanceTimeBy(101); runCurrent()
+        fake.sockets[1].push("auth.ok", """{"user":$me,"heartbeat_interval_ms":25000}"""); runCurrent()
+        assertThat(fake.devicePosts()).isEqualTo(1)
+    }
+
+    @Test fun stopsRetryingAPushTokenOnceItIsUnregistered() = runClientTest {
+        newClient()
+        fake.deviceReplies += { throw IOException("offline") }
+        client.registerPushToken("fcm1")
+        client.unregisterPushToken("fcm1")
+        advanceTimeBy(3_600_000); runCurrent()
+        assertThat(fake.devicePosts()).isEqualTo(1)
+        assertThat(fake.calls).contains("DELETE /v1/devices/fcm1")
     }
 
     @Test fun showsCachedChannelsAndMessagesBeforeTheServerAnswers() = runClientTest {
