@@ -36,12 +36,14 @@ type Hub struct {
 	log       *slog.Logger
 	opts      Options
 	beatTopic string
+	ctlTopic  string
 	metrics   *metrics.Registry // may be nil
 
-	mu     sync.Mutex
-	topics map[string]map[*Session]struct{}
-	ps     *redis.PubSub
-	closed bool
+	mu              sync.Mutex
+	topics          map[string]map[*Session]struct{}
+	tenantListeners []func(uuid.UUID)
+	ps              *redis.PubSub
+	closed          bool
 
 	connects    atomic.Int64 // Redis connections the subscriber opened since the subscription started
 	reconnected chan struct{}
@@ -56,6 +58,7 @@ func NewHub(rdb *redisx.Client, log *slog.Logger, opts Options, m *metrics.Regis
 		log:         log.With("subsystem", "realtime-hub", "hub_id", id),
 		opts:        opts,
 		beatTopic:   rdb.Key("hub", id),
+		ctlTopic:    controlTopic(rdb),
 		metrics:     m,
 		topics:      map[string]map[*Session]struct{}{},
 		reconnected: make(chan struct{}, 1),
@@ -97,7 +100,7 @@ func (h *Hub) serve(ctx context.Context) error {
 	case <-h.reconnected:
 	default:
 	}
-	ps := h.sub.Subscribe(ctx, h.beatTopic)
+	ps := h.sub.Subscribe(ctx, h.beatTopic, h.ctlTopic)
 	confirm, cancel := context.WithTimeout(ctx, 5*time.Second)
 	_, err := ps.Receive(confirm)
 	cancel()
@@ -160,6 +163,10 @@ func (h *Hub) serve(ctx context.Context) error {
 func (h *Hub) dispatch(m *redis.Message) {
 	if m.Channel == h.beatTopic {
 		h.lastBeat.Store(time.Now().UnixNano())
+		return
+	}
+	if m.Channel == h.ctlTopic {
+		h.control(m.Payload)
 		return
 	}
 	var w wire

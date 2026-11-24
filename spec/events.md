@@ -282,7 +282,7 @@ The codes are shared with REST (`Error.code` in openapi.yaml).
 | `1012` | Server restart (deploy/shutdown), or the server lost its event source and cannot promise that nothing was missed | Reconnect immediately, then sync |
 | `4000` | Protocol error (bad frame)       | Reconnect with backoff, report bug    |
 | `4001` | No `auth` within 10 s            | Reconnect                             |
-| `4003` | Authentication failed            | Do not reconnect until new credentials |
+| `4003` | Authentication failed, also sent to open connections when the app is switched off or deleted (reason `this app is switched off`) | Do not reconnect until new credentials |
 | `4004` | Token expired                    | Refresh token, reconnect              |
 | `4005` | Unsupported `protocol_version`   | Do not reconnect; upgrade the SDK     |
 | `4008` | Heartbeat timeout                | Reconnect                             |

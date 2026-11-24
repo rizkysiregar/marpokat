@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 func TestResolverCaches(t *testing.T) {
@@ -59,5 +61,42 @@ func TestResolverDoesNotCacheFailures(t *testing.T) {
 	}
 	if calls != 2 {
 		t.Fatalf("database error was cached: %d loads", calls)
+	}
+}
+
+func TestResolverForgetsATenantAndEveryRefusal(t *testing.T) {
+	calls := map[string]int{}
+	a, b := uuid.New(), uuid.New()
+	off := false
+	r := NewResolver(func(_ context.Context, key string) (Tenant, []byte, error) {
+		calls[key]++
+		switch {
+		case key == "mpk_a" && !off:
+			return Tenant{ID: a}, []byte("s"), nil
+		case key == "mpk_b":
+			return Tenant{ID: b}, []byte("s"), nil
+		}
+		return Tenant{}, nil, ErrNotFound
+	})
+	ctx := context.Background()
+	_, _, _ = r.Resolve(ctx, "mpk_a")
+	_, _, _ = r.Resolve(ctx, "mpk_b")
+
+	// a is switched off: forgetting it means the next request asks the database and is refused at once
+	off = true
+	r.ForgetTenant(a)
+	if _, _, err := r.Resolve(ctx, "mpk_a"); !errors.Is(err, ErrNotFound) || calls["mpk_a"] != 2 {
+		t.Fatalf("after forget: %v, %d loads", err, calls["mpk_a"])
+	}
+	_, _, _ = r.Resolve(ctx, "mpk_b")
+	if calls["mpk_b"] != 1 {
+		t.Fatalf("another tenant was forgotten too: %d loads", calls["mpk_b"])
+	}
+
+	// switched on again: the cached refusal goes with the next change, it does not wait for its TTL
+	off = false
+	r.ForgetTenant(a)
+	if tn, _, err := r.Resolve(ctx, "mpk_a"); err != nil || tn.ID != a {
+		t.Fatalf("after switching on: %+v %v", tn, err)
 	}
 }
