@@ -31,7 +31,7 @@ tidak dihapus. Keputusan baru ditambahkan ke bagian 2 dengan nomor berikutnya, d
 | M5        | Media dan reaction, edit/hapus pesan                       | 🟡 Kode selesai, belum diuji di dev |
 | M6        | SDK JS + chat di Narrativ web                              | ✅ Selesai (diuji di dev) |
 | M7        | SDK Android + chat di Narrativ Android                     | 🟡 Chat web ↔ Android jalan di dev; push belum diuji |
-| M9        | Website: landing, daftar akun, manajemen proyek (Laravel)  | 🟡 Console API di Go selesai, Laravel belum |
+| M9        | Website: portal pengguna + admin internal (Vue, frontend murni) | 🟡 Console API untuk browser selesai di Go (D69–D73); frontend Vue belum |
 | M8        | Hardening dan launch prod                                  | 🟡 Hardening dev selesai, setup prod disiapkan |
 
 Legenda: ⚪ belum, 🟡 berjalan, ✅ selesai, ⛔ terblokir
@@ -103,12 +103,19 @@ Legenda: ⚪ belum, 🟡 berjalan, ✅ selesai, ⛔ terblokir
 | D59 | **Reaction**: emoji string 1-64 byte tanpa spasi/kontrol, maks 10 berbeda per user per pesan, idempoten (tidak mengubah `rev_seq`); `mine` dihitung per penerima di event dan respons | Aplikasi boleh punya emoji sendiri tanpa daftar tetap |
 | D60 | **Reply**: cuplikan 200 karakter diambil saat dibaca (ikut edit/hapus pesan asal); membalas pesan yang baru dihapus diperbolehkan | Cuplikan tidak basi |
 | D61 | **`GET /v1/server/channels/dm`** mencari DM tanpa membuatnya | Membekukan DM saat blokir tidak boleh memulai percakapan |
-| D62 | **Website = Laravel sebagai frontend saja, tanpa database sendiri.** Akun, sesi, proyek, kunci, dan audit disimpan di Postgres Marpokat dan diakses lewat **Console API** (`spec/console.yaml`) di Go | Satu pemilik data dan enkripsi; Laravel bisa diganti tanpa migrasi data |
-| D63 | **Console API di listener sendiri** (`CONSOLE_ADDR`, Service `marpokat-console`), tanpa Ingress dan tanpa Cloudflare; dijaga `X-Console-Key` (≥32 karakter) + token sesi opaque (SHA-256 disimpan, idle 12 jam, maks 30 hari) | Endpoint akun tidak pernah terbuka ke internet; alamat pengunjung diteruskan lewat `X-Client-IP` |
+| D62 | ~~**Website = Laravel sebagai frontend saja**~~ Diganti D68 (2026-11-24). Yang tetap berlaku: website tanpa database sendiri; akun, sesi, proyek, kunci, dan audit disimpan di Postgres Marpokat dan diakses lewat **Console API** (`spec/console.yaml`) di Go | Satu pemilik data dan enkripsi; frontend bisa diganti tanpa migrasi data (terbukti saat Laravel diganti Vue) |
+| D63 | ~~**Console API hanya di dalam cluster**, dijaga `X-Console-Key`~~ Diganti D69–D71 (2026-11-24): frontend murni tidak bisa menyimpan service key. Yang tetap berlaku: listener sendiri (`CONSOLE_ADDR`, Service `marpokat-console`), token sesi opaque (SHA-256 disimpan, idle 12 jam, maks 30 hari) | Semula: endpoint akun tidak terbuka ke internet. Sekarang dijaga cookie + cek origin + Turnstile + limit di Go |
 | D64 | **Akun**: e-mail unik tanpa peduli huruf, argon2id (19 MiB, maks 3 hash bersamaan agar muat di pod 256 MiB), verifikasi e-mail wajib sebelum membuat proyek, `register` dan `forgot-password` menjawab sama untuk e-mail dikenal atau tidak, login dibatasi per e-mail dan per alamat, e-mail tidak dikenal dihitung selama hash yang salah | Tidak bisa dipakai untuk mengintip siapa punya akun |
 | D65 | **Secret hanya tampil sekali** (dibuat atau dirotasi); rotasi, kredensial push, dan menonaktifkan proyek meminta password lagi (10 percobaan beruntun, lalu 1 per menit); proyek milik akun lain dijawab 404 | Sesi curian tidak cukup untuk mengambil alih kunci |
 | D66 | **Platform admin** hanya lewat CLI (`marpokat account promote`), tidak ada API-nya; aksi admin tercatat di audit | Admin tidak bisa dibuat lewat celah API |
-| D67 | **E-mail dikirim oleh Go** lewat SMTP (`MAIL_DRIVER=smtp`) atau dicetak ke log (`log`, hanya pengembangan), di latar belakang agar pendaftaran tidak menunggu server surat | Laravel tidak perlu tahu token verifikasi |
+| D67 | **E-mail dikirim oleh Go** lewat SMTP (`MAIL_DRIVER=smtp`) atau dicetak ke log (`log`, hanya pengembangan), di latar belakang agar pendaftaran tidak menunggu server surat | Frontend tidak perlu tahu token verifikasi; link di e-mail (`CONSOLE_BASE_URL` + `/verify-email`, `/reset-password`) dibuka oleh portal yang meneruskan token ke API |
+| D68 | **Website = dua aplikasi Vue yang murni frontend** (file statis, tanpa server Node/PHP, tanpa logika bisnis): **portal** untuk pengguna (landing, docs, getting started, daftar/masuk, proyek, akun) dan **admin** untuk internal (akun, proyek, statistik, audit). Repo `marpokat-web` menjadi monorepo pnpm dengan `apps/portal`, `apps/admin`, `packages/console-client`, `packages/theme`. Laravel dihentikan | Semua aturan bisnis, validasi otoritatif, captcha, dan limit ada di Go; frontend hanya tampilan, jadi mudah diganti dan murah di-host (nginx statis, read-only). Admin terpisah agar bisa dikunci dan di-deploy sendiri |
+| D69 | **Console API dibuka ke browser lewat path yang sama dengan app-nya** (same-origin): Ingress tiap host web merutekan `/console/v1/*` ke Service `marpokat-console`, sisanya ke file statis app. Tanpa CORS. `X-Console-Key` dan `X-Client-IP` dihapus (Laravel tidak pernah menyala di dev, jadi tanpa masa transisi) | Same-origin berarti cookie `SameSite=Strict` bekerja dan tidak perlu membuka CORS ke origin lain |
+| D70 | **Sesi browser = cookie `__Host-mp_session`** (`HttpOnly`, `Secure`, `SameSite=Strict`, `Path=/`) yang di-set Go saat `login` dan dihapus saat `logout`; token tidak pernah terlihat JavaScript. Perlindungan CSRF: setiap request yang mengubah data wajib membawa `Origin` portal (origin `CONSOLE_BASE_URL` + `CONSOLE_ALLOWED_ORIGINS`) atau admin (`CONSOLE_ADMIN_ORIGINS`) dan, bila ber-body, `Content-Type: application/json`. Semua jawaban `Cache-Control: no-store` | Token di `localStorage` bisa dicuri XSS; cookie `HttpOnly` tidak. SameSite + cek Origin menutup CSRF tanpa token tambahan |
+| D71 | **Sesi punya scope `portal` atau `admin`** (kolom `console_sessions.scope`, migrasi 00005), ditentukan dari `Origin` saat login. Login dari origin admin (`CONSOLE_ADMIN_ORIGINS`) hanya untuk platform admin (selain itu 403, tanpa sesi). Endpoint `/admin/*` butuh sesi admin; sesi portal milik admin dijawab 403. Cookie host-only, jadi sesi portal dan admin terpisah. Host admin dijaga juga oleh Cloudflare Access. Promosi admin tetap hanya CLI (D66) | Diikat ke sesi, bukan ke header saat dipakai: sesi portal admin yang bocor tidak cukup untuk mengelola platform. Admin punya lapisan login kedua di Cloudflare |
+| D72 | **Turnstile diverifikasi Go** di `register` dan `forgot-password` (`TURNSTILE_SECRET_KEY`; `400 captcha_failed`, `503 captcha_unavailable` karena gagal tertutup bila Cloudflare tak terjangkau; mati bila kosong untuk pengembangan). Dicek setelah validasi input dan limit, supaya salah ketik tidak menghabiskan token dan banjir request tidak diteruskan ke Cloudflare. Frontend hanya menampilkan widget dan mengirim `turnstile_token` | Secret captcha tidak boleh di browser; robot yang memanggil API langsung tetap terhalang |
+| D73 | **Alamat pengunjung dibaca Go dari `CF-Connecting-IP`** hanya bila request datang dari proxy tepercaya (`CONSOLE_TRUSTED_PROXIES`, CIDR ingress; default rentang privat cluster), selain itu dari alamat koneksi. `X-Client-IP` dihapus bersama service key | Limit login/daftar dan audit tetap melihat orangnya, dan header tidak bisa dipalsukan dari luar |
+| D74 | **Stack website**: Vue 3 + TypeScript + Vite. Portal pakai **Nuxt 4 mode statis** (`nuxt generate`: landing dan docs di-prerender untuk SEO, `/app/**` hanya di browser), Tailwind 4 + tema Marpokat (`--mp-*`), komponen headless Reka UI, docs ditulis Markdown (Nuxt Content). Admin pakai **Quasar** (SPA, komponen tabel/form/dialog lengkap) dengan warna brand dari token Marpokat, tanpa Tailwind. Bersama: client bertipe dari `spec/console.yaml` (`openapi-typescript` + `openapi-fetch`), TanStack Query untuk data server, Pinia untuk sesi, VeeValidate + Zod untuk form (validasi di browser hanya kenyamanan, Go tetap penentu), Vitest + Playwright | Portal butuh SEO dan tampilan khas brand; admin butuh banyak tabel dan form cepat. Dua sistem styling tidak dicampur dalam satu app. Client yang di-generate dari spec membuat perubahan kontrak ketahuan saat compile |
 
 ---
 
@@ -146,6 +153,20 @@ supaya prepared statement tidak bentrok antar koneksi.
 | `@rizkysiregar/marpokat-react`  | Hooks di atas core (`useChannels`, `useMessages`, `useSendMessage`). Cocok dengan Zustand + React Query        |
 | `marpokat-android` | Kotlin, OkHttp WebSocket, Coroutines + `StateFlow`, kotlinx.serialization, Room (cache + antrean kirim)        |
 | Distribusi         | GitHub Packages (npm + Maven), private. Group Maven `com.rizkysiregar.marpokat`                                 |
+
+### Website (repo `marpokat-web`, D68, D74)
+
+| Bagian              | Pilihan                                                                                                   |
+| ------------------- | --------------------------------------------------------------------------------------------------------- |
+| Monorepo            | pnpm workspaces: `apps/portal`, `apps/admin`, `packages/console-client`, `packages/theme`                 |
+| Bahasa / build      | TypeScript strict, Vue 3 (Composition API, `<script setup>`), Vite                                        |
+| Portal              | Nuxt 4 mode statis (`nuxt generate`), Nuxt Content (docs Markdown), Tailwind 4, Reka UI, tema `--mp-*`    |
+| Admin               | Quasar 2 (SPA, Vite), brand dari token Marpokat, tanpa Tailwind                                           |
+| Data / state        | `openapi-fetch` + tipe dari `spec/console.yaml` (`openapi-typescript`), TanStack Query (Vue), Pinia       |
+| Form                | VeeValidate + Zod (hanya kenyamanan; Go yang menentukan)                                                  |
+| Tes                 | Vitest (unit, komponen), Playwright (alur daftar → proyek terhadap API palsu/MSW), uji kontras tema WCAG  |
+| Kualitas            | ESLint (flat config) + Prettier, `vue-tsc`                                                                |
+| Runtime             | Image nginx-unprivileged berisi file statis, read-only, UID 10001; header keamanan dan CSP di config nginx |
 
 ### Infra
 
@@ -188,6 +209,21 @@ supaya prepared statement tidak bentrok antar koneksi.
                                        └───┬────────────────────────────┘
                                            ▼
                                 RabbitMQ (/marpokat) + DLQ      MinIO (marpokat-media)
+```
+
+Website (D68–D73): dua host, masing-masing satu Ingress dengan dua path. Browser hanya bicara ke origin-nya sendiri.
+
+```
+ marpokat.rizkysiregar.my.id (portal)        admin-marpokat.rizkysiregar.my.id (admin, + Cloudflare Access)
+   /            → portal (nginx, file statis)   /            → admin (nginx, file statis)
+   /console/v1  ─┐                              /console/v1  ─┐
+                 └──────────────┬───────────────────────────────┘
+                                ▼
+                  marpokat console (Go, CONSOLE_ADDR)
+                  cookie __Host-mp_session, cek Origin, Turnstile,
+                  limit, /admin/* hanya dari origin admin
+                                ▼
+                            Postgres
 ```
 
 ---
@@ -539,17 +575,46 @@ lewat FCM memakai kredensial tenant. Payload: `channel_id`, `message_id`, nama p
 
 ### M9: Website 🟡
 
-Satu aplikasi Laravel (frontend saja) untuk landing page, pendaftaran, manajemen proyek, dan admin platform. Semua data lewat Console API.
+~~Satu aplikasi Laravel (frontend saja) untuk landing page, pendaftaran, manajemen proyek, dan admin platform.~~ Diganti
+2026-11-24 (D68): dua aplikasi Vue murni frontend, **portal** (pengguna) dan **admin** (internal), di repo `marpokat-web`.
+Semua data dan aturan lewat Console API, yang dibuka ke browser secara same-origin (D69–D73).
 
 - [x] Kontrak `spec/console.yaml` (auth, akun, proyek, push, audit, admin)
 - [x] Go: migrasi 00004 (accounts, account_tokens, console_sessions, console_audit, tenants.account_id), paket `internal/console`, listener terpisah, CLI `account promote`, bersih-bersih sesi kedaluwarsa
 - [x] Tes: unit (password, e-mail, slug, MIME, SMTP palsu, konfigurasi) dan integrasi terhadap Postgres + Redis nyata (alur daftar → verifikasi → proyek → rotasi, batas, isolasi antar akun, admin)
 - [x] Gitops dev: port dan Service `marpokat-console` (mati sampai `CONSOLE_ADDR` diisi)
 - [x] SMTP: akun yang sama dengan Narrativ (`monostacklabs.studio@gmail.com`); password aplikasinya disimpan di secret, bukan di repo
-- [x] Repo terpisah `marpokat-web` (Laravel 12, Blade, Tailwind 4, FrankenPHP; tanpa database): landing, docs, daftar/masuk/lupa password, konfirmasi e-mail, proyek (secret tampil sekali, push, pengaturan, matikan), akun (sesi, audit), admin; 36 tes; CSP ketat; image read-only tanpa capabilities; diuji ujung ke ujung terhadap Console API sungguhan
-- [x] Jenkinsfile + manifest `homelabs-gitops/apps/marpokat-web-dev` (host dev `app-dev-marpokat.rizkysiregar.my.id`; prod `marpokat.rizkysiregar.my.id` menyusul)
-- [ ] Menyalakan di dev: secret (`CONSOLE_SERVICE_KEY`, `MAIL_*`, `marpokat-web-secrets`), configmap `CONSOLE_ADDR`, pipeline Jenkins, Argo app, Cloudflare Tunnel (langkah di README gitops)
-- [ ] **Selesai jika:** orang bisa mendaftar di website, membuat proyek, mendapat API key dan secret, dan memakainya di aplikasi
+- [x] ~~Repo terpisah `marpokat-web` (Laravel 12, Blade, Tailwind 4, FrankenPHP; tanpa database): landing, docs, daftar/masuk/lupa password, konfirmasi e-mail, proyek (secret tampil sekali, push, pengaturan, matikan), akun (sesi, audit), admin; 36 tes; CSP ketat~~ Dihentikan (D68). Tetap dipakai sebagai acuan perilaku dan teks: halaman, pesan error, Turnstile, Terms/Privacy, tema avocado
+- [x] ~~Jenkinsfile + manifest `homelabs-gitops/apps/marpokat-web-dev` untuk Laravel~~ Diganti tugas gitops di bawah
+
+**Go (Console API untuk browser, D69–D73):**
+
+- [x] `login` men-set cookie `__Host-mp_session` (token tidak lagi di body), `logout` dan sesi yang sudah berakhir menghapusnya; middleware membaca sesi dari cookie
+- [x] Cek `Origin` + `Content-Type: application/json` untuk request yang mengubah data; semua jawaban `no-store` + `nosniff`
+- [x] Scope sesi `portal`/`admin` (migrasi 00005); login admin hanya dari `CONSOLE_ADMIN_ORIGINS` dan hanya untuk platform admin; `/admin/*` butuh sesi admin (D71)
+- [x] Verifikasi Turnstile di `register` dan `forgot-password` (`TURNSTILE_SECRET_KEY`, gagal tertutup, D72)
+- [x] Alamat pengunjung dari `CF-Connecting-IP` di belakang proxy tepercaya (`CONSOLE_TRUSTED_PROXIES`, D73). Limit per alamat untuk `register`, `forgot-password`, `login` sudah ada; `resend-verification` dibatasi per akun
+- [x] `X-Console-Key`, `X-Client-IP`, dan `CONSOLE_SERVICE_KEY` dihapus (tanpa masa transisi: Laravel tidak pernah menyala di dev)
+- [x] `spec/console.yaml` 0.2.0: bagian "Not public" ditulis ulang (cookie, origin, scope, Turnstile), field `turnstile_token`, server URL publik
+- [x] Tes: unit (guard Origin/Content-Type, IP dari proxy tepercaya vs tidak, atribut cookie, Turnstile dengan Cloudflare palsu termasuk tidak terjangkau, config) dan integrasi (cookie login/logout/sesi berakhir, request lintas situs, scope admin, Turnstile)
+
+**Frontend (repo `marpokat-web`, D74):**
+
+- [ ] Monorepo pnpm: `apps/portal`, `apps/admin`, `packages/console-client` (generate dari `spec/console.yaml`), `packages/theme` (port `marpokat-theme.css` + uji kontras)
+- [ ] Portal: landing, Terms, Privacy, docs (getting started, membuat proyek, alur token, server API, SDK JS/Android, push)
+- [ ] Portal: daftar (Turnstile), masuk, lupa/reset password, konfirmasi e-mail, kirim ulang verifikasi
+- [ ] Portal: proyek (buat, detail, secret tampil sekali, rotasi, kredensial push, pengaturan, matikan), akun (profil, password, sesi, audit)
+- [ ] Admin: masuk, statistik, daftar akun (cari, nonaktifkan), daftar proyek (cari, nonaktifkan), audit
+- [ ] Image nginx statis per app (read-only, UID 10001, CSP ketat tanpa `unsafe-inline`, `frame-ancestors 'none'`, `index.html` `no-store`, aset ber-hash cache panjang)
+- [ ] Tes: Vitest + Playwright terhadap API palsu (MSW) untuk alur utama portal dan admin
+- [ ] Jenkinsfile (lint, typecheck, test, build dua image `marpokat-portal` dan `marpokat-admin`)
+
+**Gitops dan dev:**
+
+- [ ] `apps/marpokat-web-dev` ditulis ulang: deployment portal + admin, Ingress host portal dan admin dengan path `/console/v1` → `marpokat-console` (D69)
+- [ ] Configmap Go: `CONSOLE_ADMIN_ORIGINS` (dan `CONSOLE_ALLOWED_ORIGINS` bila perlu; `CONSOLE_ADDR`, `CONSOLE_BASE_URL` sudah ada); secret `TURNSTILE_SECRET_KEY`, `MAIL_*`; `CONSOLE_SERVICE_KEY` dihapus dari secret
+- [ ] Cloudflare Tunnel host dev (portal `app-dev-marpokat`, admin `admin-dev-marpokat`) + Cloudflare Access untuk host admin, Argo app, pipeline Jenkins
+- [ ] **Selesai jika:** orang bisa mendaftar di portal, membuat proyek, mendapat API key dan secret, dan memakainya di aplikasi; admin bisa melihat dan menonaktifkan akun/proyek dari host admin, dan host admin tidak bisa dibuka tanpa Cloudflare Access
 
 ### M8: Hardening dan launch prod 🟡
 
@@ -576,7 +641,7 @@ Hardening di dev (2026-11-23), sebelum prod:
 
 ## 13. Di luar MVP
 
-Developer console web, billing/metering, UI kit, thread, search full-text, E2E encryption, voice/video call, channel publik,
+~~Developer console web~~ (masuk M9), billing/metering, UI kit, thread, search full-text, E2E encryption, voice/video call, channel publik,
 moderasi otomatis (filter kata, deteksi spam), pesan terjadwal, multi-region, iOS/Flutter SDK. Desain di atas tidak menutup
 kemungkinan untuk semuanya.
 
@@ -613,3 +678,4 @@ kemungkinan untuk semuanya.
 | 2026-11-22 | M3 dikerjakan: D39–D46, WebSocket, fan-out Redis, typing, presence, rate limit, CORS |
 | 2026-11-22 | M3 selesai: diuji lewat wss di dev. M4 dikerjakan: D47–D53, relay outbox, RabbitMQ, push FCM, perangkat |
 | 2026-11-23 | Pengembangan MVP ditutup: chat diuji di Narrativ web + Android dev. M8: manifest prod `apps/marpokat` disiapkan |
+| 2026-11-24 | M9 diubah: Laravel dihentikan, website menjadi dua app Vue murni frontend (portal + admin). D62/D63 diganti, D68–D74 ditambahkan, stack website di bagian 3, diagram website di bagian 4, tugas M9 ditulis ulang. Console API untuk browser selesai di Go (cookie, Origin, scope admin, Turnstile, IP) |

@@ -7,6 +7,7 @@ package config
 import (
 	"encoding/base64"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"strings"
 	"time"
@@ -113,15 +114,26 @@ func (m MinIO) HostAndTLS() (string, bool, error) {
 	}
 }
 
-// Console is the account side of the website (PLAN M9). It is off unless Addr is set: the Console API lives on its own
-// listener, reachable only from the website inside the cluster, never through the public ingress.
+// Console is the account side of the website (PLAN M9, D68-D73). It is off unless Addr is set. The website is two
+// static Vue apps (portal and admin) that call this API from the browser, on their own origin: the ingress of each web
+// host sends /console/v1 here. Sessions are cookies, so requests that change something must come from a known origin.
 type Console struct {
 	Addr string `env:"CONSOLE_ADDR"`
-	// ServiceKey is what the website sends in X-Console-Key. At least 32 characters.
-	ServiceKey string `env:"CONSOLE_SERVICE_KEY"`
-	// BaseURL is the public address of the website, for the links in e-mails.
-	BaseURL     string `env:"CONSOLE_BASE_URL"`
-	MaxProjects int    `env:"CONSOLE_MAX_PROJECTS" envDefault:"3"`
+	// BaseURL is the public address of the portal, for the links in e-mails. Its origin is always allowed.
+	BaseURL string `env:"CONSOLE_BASE_URL"`
+	// AllowedOrigins are more portal origins (for example a local development server), besides BaseURL's.
+	AllowedOrigins []string `env:"CONSOLE_ALLOWED_ORIGINS" envSeparator:","`
+	// AdminOrigins are the origins of the admin app. Only a sign in from one of them gives an admin session. Empty
+	// means nobody can use the admin endpoints.
+	AdminOrigins []string `env:"CONSOLE_ADMIN_ORIGINS" envSeparator:","`
+	// TrustedProxies are the networks (CIDR) whose CF-Connecting-IP / X-Forwarded-For is believed: the ingress. A
+	// request from anywhere else is keyed by its own address. The default is the private ranges of the cluster.
+	TrustedProxies []string `env:"CONSOLE_TRUSTED_PROXIES" envSeparator:"," envDefault:"10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,127.0.0.0/8,::1/128,fc00::/7"`
+	// TurnstileSecretKey turns on the Cloudflare Turnstile check of sign up and password reset. Empty: no check
+	// (development only).
+	TurnstileSecretKey string `env:"TURNSTILE_SECRET_KEY"`
+	TurnstileVerifyURL string `env:"TURNSTILE_VERIFY_URL" envDefault:"https://challenges.cloudflare.com/turnstile/v0/siteverify"`
+	MaxProjects        int    `env:"CONSOLE_MAX_PROJECTS" envDefault:"3"`
 
 	// MailDriver is "log" (prints the e-mail, development) or "smtp".
 	MailDriver   string `env:"MAIL_DRIVER" envDefault:"log"`
@@ -134,18 +146,38 @@ type Console struct {
 
 func (c Console) Enabled() bool { return c.Addr != "" }
 
-// Validate checks what a running Console API needs. A weak service key would make the whole account system
-// guessable, so it fails the start rather than running.
+// Validate checks what a running Console API needs, so that a bad origin or proxy list fails the start rather than
+// letting the wrong sites in.
 func (c Console) Validate() error {
 	if !c.Enabled() {
 		return nil
 	}
-	if len(c.ServiceKey) < 32 {
-		return fmt.Errorf("CONSOLE_SERVICE_KEY must be at least 32 characters (generate with: openssl rand -base64 32)")
-	}
 	u, err := url.Parse(c.BaseURL)
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
 		return fmt.Errorf("CONSOLE_BASE_URL %q is not a URL like https://marpokat.example.com", c.BaseURL)
+	}
+	portal, err := c.PortalOrigins()
+	if err != nil {
+		return err
+	}
+	admin, err := c.AdminOriginList()
+	if err != nil {
+		return err
+	}
+	for _, a := range admin {
+		for _, p := range portal {
+			if a == p {
+				return fmt.Errorf("%s is both a portal and an admin origin: the admin app needs its own host", a)
+			}
+		}
+	}
+	if _, err := c.TrustedProxyPrefixes(); err != nil {
+		return err
+	}
+	if c.TurnstileSecretKey != "" {
+		if v, err := url.Parse(c.TurnstileVerifyURL); err != nil || v.Scheme != "https" && v.Scheme != "http" || v.Host == "" {
+			return fmt.Errorf("TURNSTILE_VERIFY_URL %q is not a URL", c.TurnstileVerifyURL)
+		}
 	}
 	switch c.MailDriver {
 	case "log":
@@ -157,6 +189,65 @@ func (c Console) Validate() error {
 		return fmt.Errorf("MAIL_DRIVER must be log or smtp, got %q", c.MailDriver)
 	}
 	return nil
+}
+
+// PortalOrigins is BaseURL's origin followed by AllowedOrigins, each as scheme://host[:port].
+func (c Console) PortalOrigins() ([]string, error) {
+	base, err := url.Parse(c.BaseURL)
+	if err != nil {
+		return nil, fmt.Errorf("CONSOLE_BASE_URL %q is not a URL", c.BaseURL)
+	}
+	out := []string{strings.ToLower(base.Scheme + "://" + base.Host)}
+	for _, raw := range c.AllowedOrigins {
+		o, err := Origin(raw)
+		if err != nil {
+			return nil, fmt.Errorf("CONSOLE_ALLOWED_ORIGINS: %w", err)
+		}
+		out = append(out, o)
+	}
+	return out, nil
+}
+
+// AdminOriginList is AdminOrigins, each as scheme://host[:port].
+func (c Console) AdminOriginList() ([]string, error) {
+	out := make([]string, 0, len(c.AdminOrigins))
+	for _, raw := range c.AdminOrigins {
+		o, err := Origin(raw)
+		if err != nil {
+			return nil, fmt.Errorf("CONSOLE_ADMIN_ORIGINS: %w", err)
+		}
+		out = append(out, o)
+	}
+	return out, nil
+}
+
+// TrustedProxyPrefixes parses TrustedProxies.
+func (c Console) TrustedProxyPrefixes() ([]netip.Prefix, error) {
+	out := make([]netip.Prefix, 0, len(c.TrustedProxies))
+	for _, raw := range c.TrustedProxies {
+		raw = strings.TrimSpace(raw)
+		if raw == "" {
+			continue
+		}
+		p, err := netip.ParsePrefix(raw)
+		if err != nil {
+			return nil, fmt.Errorf("CONSOLE_TRUSTED_PROXIES: %q is not a network like 10.0.0.0/8", raw)
+		}
+		out = append(out, p.Masked())
+	}
+	return out, nil
+}
+
+// Origin checks that raw is an origin as a browser sends it (scheme://host[:port], nothing after) and returns it in
+// lower case.
+func Origin(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.User != nil ||
+		(u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.Fragment != "" {
+		return "", fmt.Errorf("%q is not an origin like https://marpokat.example.com", raw)
+	}
+	return strings.ToLower(u.Scheme + "://" + u.Host), nil
 }
 
 // Secrets holds the master key that encrypts tenant secrets at rest (AES-256-GCM, PLAN section 6).

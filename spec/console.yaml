@@ -1,22 +1,31 @@
 openapi: 3.1.0
 info:
   title: Marpokat Console API
-  version: 0.1.0
+  version: 0.2.0
   description: |
-    The API behind the Marpokat website (landing, sign up, project management). It is for **one client: the web
-    frontend**, which holds no data of its own. Accounts, sessions, projects, keys and the audit log all live here.
+    The API behind the Marpokat website: the **portal** (landing, docs, sign up, project management) and the **admin**
+    app (internal). Both are static apps that hold no data and no logic of their own: they call this API from the
+    browser. Accounts, sessions, projects, keys and the audit log all live here.
 
-    ## Not public
-    It is served on its own listener (`CONSOLE_ADDR`), reachable inside the cluster only, never through the public
-    ingress or Cloudflare. Every request carries the frontend's service key:
+    ## Where it is
+    On its own listener (`CONSOLE_ADDR`). The ingress of each web host sends `/console/v1` here and everything else to
+    the app's files, so the API is always on the **same origin** as the app that calls it: no CORS.
 
-    ```
-    X-Console-Key: <CONSOLE_SERVICE_KEY>
-    ```
-
-    and, once a person is signed in, their session token (`Authorization: Bearer <session token>`) from `login`.
-    The frontend forwards the visitor's address in `X-Client-IP` so that limits and the audit log see the person,
-    not the frontend.
+    ## Sessions and requests (browser only)
+    - `login` sets the session cookie `__Host-mp_session` (`HttpOnly`, `Secure`, `SameSite=Strict`, `Path=/`). The
+      token is never in a response body: no script on the page can read it. `logout` clears it, and so does any answer
+      `401` to a request that carried an ended session.
+    - Every request that is not `GET`/`HEAD` must carry an `Origin` of the portal or the admin app
+      (`403 origin_not_allowed` otherwise) and, when it has a body, `Content-Type: application/json`
+      (`415 unsupported_media_type` otherwise). Browsers do both on their own for `fetch` with a JSON body.
+    - A sign in on the admin app's origin gives an **admin session** and is only for platform administrators. The
+      `/admin/*` endpoints need an admin session; a portal session of an administrator gets `403`.
+    - Sign up and password reset carry a Cloudflare Turnstile token (`turnstile_token`) when the server has the check
+      turned on: `400 captcha_failed` when it does not pass, `503 captcha_unavailable` when Cloudflare cannot be
+      reached (the check fails closed).
+    - The visitor's address (limits, audit) is `CF-Connecting-IP` as the ingress passes it on; the header is ignored
+      on connections that do not come from a trusted proxy.
+    - Every answer is `Cache-Control: no-store`.
 
     ## Accounts
     - E-mail is the identity (lower-cased, unique). Passwords are 10 to 128 characters and stored as argon2id.
@@ -36,15 +45,18 @@ info:
     Same shape as the chat API: `{ "error": { "code", "message", "details?" } }`. Limits answer `429 rate_limited`
     with `Retry-After`.
 servers:
-  - url: http://marpokat-console.marpokat.svc.cluster.local:8081/console/v1
-    description: inside the cluster
+  - url: https://marpokat.rizkysiregar.my.id/console/v1
+    description: the portal (production)
+  - url: https://admin-marpokat.rizkysiregar.my.id/console/v1
+    description: the admin app (production)
+  - url: https://app-dev-marpokat.rizkysiregar.my.id/console/v1
+    description: the portal (development)
 tags:
   - { name: Auth }
   - { name: Account }
   - { name: Projects }
   - { name: Platform admin, description: "Only for accounts with `is_platform_admin`" }
-security:
-  - serviceKey: []
+security: []
 paths:
   /auth/register:
     post:
@@ -63,10 +75,12 @@ paths:
                 email: { type: string, format: email, maxLength: 254 }
                 password: { type: string, minLength: 10, maxLength: 128 }
                 name: { type: string, minLength: 1, maxLength: 100 }
+                turnstile_token: { $ref: "#/components/schemas/TurnstileToken" }
       responses:
         "201": { description: Registered, content: { application/json: { schema: { type: object, properties: { message: { type: string } } } } } }
-        "400": { $ref: "#/components/responses/Validation" }
+        "400": { description: "Validation failed, or `captcha_failed`", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/CaptchaUnavailable" }
   /auth/verify-email:
     post:
       tags: [Auth]
@@ -84,7 +98,7 @@ paths:
       summary: Send the verification e-mail again
       description: For the signed-in account that has not verified yet. At most 3 per hour.
       operationId: resendVerification
-      security: [{ serviceKey: [], session: [] }]
+      security: [{ session: [] }]
       responses:
         "204": { description: Sent (or already verified) }
         "401": { $ref: "#/components/responses/Unauthenticated" }
@@ -95,22 +109,28 @@ paths:
       summary: Sign in
       description: |
         Limited per e-mail (5 tries then 15 minutes) and per address. The same `invalid_credentials` answer for an
-        unknown e-mail and a wrong password, and the same time to answer.
+        unknown e-mail and a wrong password, and the same time to answer. Sets the session cookie. From the admin app's
+        origin it starts an admin session, and an account that is not a platform administrator gets `403 forbidden`.
       operationId: login
       requestBody:
         required: true
         content: { application/json: { schema: { type: object, required: [email, password], properties: { email: { type: string }, password: { type: string } } } } }
       responses:
-        "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Session" } } } }
+        "200":
+          description: Signed in
+          headers:
+            Set-Cookie: { description: "`__Host-mp_session=...; Path=/; Max-Age=...; HttpOnly; Secure; SameSite=Strict`", schema: { type: string } }
+          content: { application/json: { schema: { $ref: "#/components/schemas/Session" } } }
         "401": { description: invalid_credentials, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
-        "403": { description: The account is disabled, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "403": { description: "The account is disabled (`account_disabled`), or not an administrator signing in on the admin app (`forbidden`)", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "429": { $ref: "#/components/responses/RateLimited" }
   /auth/logout:
     post:
       tags: [Auth]
       summary: End this session
+      description: Clears the session cookie.
       operationId: logout
-      security: [{ serviceKey: [], session: [] }]
+      security: [{ session: [] }]
       responses:
         "204": { description: Signed out }
   /auth/forgot-password:
@@ -121,10 +141,12 @@ paths:
       operationId: forgotPassword
       requestBody:
         required: true
-        content: { application/json: { schema: { type: object, required: [email], properties: { email: { type: string } } } } }
+        content: { application/json: { schema: { type: object, required: [email], properties: { email: { type: string }, turnstile_token: { $ref: "#/components/schemas/TurnstileToken" } } } } }
       responses:
         "204": { description: Accepted }
+        "400": { description: "`captcha_failed`", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "429": { $ref: "#/components/responses/RateLimited" }
+        "503": { $ref: "#/components/responses/CaptchaUnavailable" }
   /auth/reset-password:
     post:
       tags: [Auth]
@@ -142,7 +164,7 @@ paths:
       tags: [Account]
       summary: The signed-in account
       operationId: getMe
-      security: [{ serviceKey: [], session: [] }]
+      security: [{ session: [] }]
       responses:
         "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Account" } } } }
         "401": { $ref: "#/components/responses/Unauthenticated" }
@@ -150,7 +172,7 @@ paths:
       tags: [Account]
       summary: Change the name
       operationId: updateMe
-      security: [{ serviceKey: [], session: [] }]
+      security: [{ session: [] }]
       requestBody:
         required: true
         content: { application/json: { schema: { type: object, properties: { name: { type: string, minLength: 1, maxLength: 100 } } } } }
@@ -163,7 +185,7 @@ paths:
       summary: Change the password
       description: Ends every other session.
       operationId: changePassword
-      security: [{ serviceKey: [], session: [] }]
+      security: [{ session: [] }]
       requestBody:
         required: true
         content: { application/json: { schema: { type: object, required: [current_password, new_password], properties: { current_password: { type: string }, new_password: { type: string, minLength: 10, maxLength: 128 } } } } }
@@ -176,7 +198,7 @@ paths:
       tags: [Account]
       summary: Where the account is signed in
       operationId: listSessions
-      security: [{ serviceKey: [], session: [] }]
+      security: [{ session: [] }]
       responses:
         "200": { description: OK, content: { application/json: { schema: { type: object, properties: { sessions: { type: array, items: { $ref: "#/components/schemas/SessionInfo" } } } } } } }
   /me/audit:
@@ -184,7 +206,7 @@ paths:
       tags: [Account]
       summary: Recent security events of the account (sign-ins, key rotations, ...)
       operationId: listAudit
-      security: [{ serviceKey: [], session: [] }]
+      security: [{ session: [] }]
       parameters:
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
       responses:
@@ -194,7 +216,7 @@ paths:
       tags: [Projects]
       summary: The account's projects
       operationId: listProjects
-      security: [{ serviceKey: [], session: [] }]
+      security: [{ session: [] }]
       responses:
         "200": { description: OK, content: { application/json: { schema: { type: object, properties: { projects: { type: array, items: { $ref: "#/components/schemas/Project" } } } } } } }
     post:
@@ -202,7 +224,7 @@ paths:
       summary: Create a project
       description: Needs a verified e-mail. The answer carries the `api_secret`, shown only now.
       operationId: createProject
-      security: [{ serviceKey: [], session: [] }]
+      security: [{ session: [] }]
       requestBody:
         required: true
         content:
@@ -225,7 +247,7 @@ paths:
       tags: [Projects]
       summary: One project, with its usage
       operationId: getProject
-      security: [{ serviceKey: [], session: [] }]
+      security: [{ session: [] }]
       responses:
         "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/ProjectDetail" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -233,7 +255,7 @@ paths:
       tags: [Projects]
       summary: Rename, or change what clients may do
       operationId: updateProject
-      security: [{ serviceKey: [], session: [] }]
+      security: [{ session: [] }]
       requestBody:
         required: true
         content:
@@ -254,7 +276,7 @@ paths:
       summary: Replace the api secret
       description: The old secret stops working within 30 seconds. The new one is shown only in this answer.
       operationId: rotateSecret
-      security: [{ serviceKey: [], session: [] }]
+      security: [{ session: [] }]
       parameters:
         - { $ref: "#/components/parameters/ProjectId" }
       requestBody:
@@ -272,7 +294,7 @@ paths:
       summary: Set the Firebase service account used for push notifications
       description: Stored encrypted and never returned; `GET` shows only which project and account it is.
       operationId: setPush
-      security: [{ serviceKey: [], session: [] }]
+      security: [{ session: [] }]
       requestBody:
         required: true
         content:
@@ -292,7 +314,7 @@ paths:
       tags: [Projects]
       summary: Whether push is set up
       operationId: getPush
-      security: [{ serviceKey: [], session: [] }]
+      security: [{ session: [] }]
       responses:
         "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/PushStatus" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
@@ -300,7 +322,7 @@ paths:
       tags: [Projects]
       summary: Remove the push credentials
       operationId: removePush
-      security: [{ serviceKey: [], session: [] }]
+      security: [{ session: [] }]
       requestBody:
         required: true
         content: { application/json: { schema: { $ref: "#/components/schemas/PasswordConfirmation" } } }
@@ -314,7 +336,7 @@ paths:
       summary: Switch a project off (or on again)
       description: A disabled project's apps get 401 within 30 seconds.
       operationId: setProjectDisabled
-      security: [{ serviceKey: [], session: [] }]
+      security: [{ session: [] }]
       parameters:
         - { $ref: "#/components/parameters/ProjectId" }
       requestBody:
@@ -334,7 +356,7 @@ paths:
       tags: [Platform admin]
       summary: All accounts
       operationId: adminListAccounts
-      security: [{ serviceKey: [], session: [] }]
+      security: [{ session: [] }]
       parameters:
         - { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 100, default: 50 } }
         - { name: cursor, in: query, schema: { type: string } }
@@ -347,7 +369,7 @@ paths:
       summary: Disable or enable an account
       description: A disabled account cannot sign in and its sessions end. Its projects keep running unless disabled themselves.
       operationId: adminSetAccountDisabled
-      security: [{ serviceKey: [], session: [] }]
+      security: [{ session: [] }]
       parameters:
         - { name: account_id, in: path, required: true, schema: { type: string, format: uuid } }
       requestBody:
@@ -362,7 +384,7 @@ paths:
       tags: [Platform admin]
       summary: All projects
       operationId: adminListProjects
-      security: [{ serviceKey: [], session: [] }]
+      security: [{ session: [] }]
       responses:
         "200": { description: OK, content: { application/json: { schema: { type: object, properties: { projects: { type: array, items: { $ref: "#/components/schemas/AdminProject" } } } } } } }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -371,7 +393,7 @@ paths:
       tags: [Platform admin]
       summary: Disable or enable any project
       operationId: adminSetProjectDisabled
-      security: [{ serviceKey: [], session: [] }]
+      security: [{ session: [] }]
       parameters:
         - { $ref: "#/components/parameters/ProjectId" }
       requestBody:
@@ -386,7 +408,7 @@ paths:
       tags: [Platform admin]
       summary: Totals across the platform
       operationId: adminStats
-      security: [{ serviceKey: [], session: [] }]
+      security: [{ session: [] }]
       responses:
         "200":
           description: OK
@@ -404,16 +426,16 @@ paths:
         "403": { $ref: "#/components/responses/Forbidden" }
 components:
   securitySchemes:
-    serviceKey: { type: apiKey, in: header, name: X-Console-Key }
-    session: { type: http, scheme: bearer }
+    session: { type: apiKey, in: cookie, name: __Host-mp_session, description: "Set by `login`; the browser sends it." }
   parameters:
     ProjectId: { name: project_id, in: path, required: true, schema: { type: string, format: uuid } }
   responses:
     Validation: { description: Validation failed, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
     Unauthenticated: { description: No valid session (`unauthenticated`), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
-    Forbidden: { description: Not allowed (`forbidden`), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+    Forbidden: { description: "Not allowed (`forbidden`): not a platform administrator, or not an admin session", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
     NotFound: { description: "Not found, also for a project of another account", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
     WrongPassword: { description: The password does not match (`wrong_password`), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+    CaptchaUnavailable: { description: Cloudflare could not be reached to check the Turnstile token (`captcha_unavailable`), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
     RateLimited: { description: Too many requests (`rate_limited`), headers: { Retry-After: { schema: { type: integer } } }, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   schemas:
     Error:
@@ -439,12 +461,16 @@ components:
         is_platform_admin: { type: boolean }
         disabled: { type: boolean }
         created_at: { type: string, format: date-time }
+    TurnstileToken:
+      type: string
+      maxLength: 2048
+      description: The token the Turnstile widget gave the page. Required when the server has the check turned on.
     Session:
       type: object
-      required: [token, expires_at, account]
+      required: [expires_at, scope, account]
       properties:
-        token: { type: string, description: "Opaque. Keep it server side (the frontend's own session) and send it as the bearer token." }
-        expires_at: { type: string, format: date-time }
+        expires_at: { type: string, format: date-time, description: "When the session ends if it is not used (it is extended on use, 30 days at most)." }
+        scope: { type: string, enum: [portal, admin] }
         account: { $ref: "#/components/schemas/Account" }
     SessionInfo:
       type: object
@@ -455,10 +481,11 @@ components:
         last_seen_at: { type: string, format: date-time }
         user_agent: { type: string }
         ip: { type: string }
+        scope: { type: string, enum: [portal, admin] }
     AuditEvent:
       type: object
       properties:
-        action: { type: string, examples: [login, password_changed, project_created, secret_rotated, push_set] }
+        action: { type: string, examples: [login, admin_login, password_changed, project_created, secret_rotated, push_set] }
         target: { type: [string, "null"] }
         ip: { type: string }
         at: { type: string, format: date-time }

@@ -2,11 +2,13 @@ package console
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"log/slog"
+	"mime"
 	"net"
 	"net/http"
+	"net/netip"
 	"strings"
 	"time"
 
@@ -17,28 +19,49 @@ import (
 	"github.com/rizkysiregar/marpokat/server/internal/tenant"
 )
 
-// HeaderServiceKey carries the key that says "this is the website". HeaderClientIP and HeaderClientUA carry the
-// visitor's address and browser, as the website saw them.
+// SessionCookie holds the session token (PLAN D70). The __Host- prefix makes the browser refuse it unless it is
+// Secure, has Path=/ and no Domain: it belongs to exactly the host that set it, so the portal and the admin app each
+// have their own session.
+const SessionCookie = "__Host-mp_session"
+
+// Codes of the request guard.
 const (
-	HeaderServiceKey = "X-Console-Key"
-	HeaderClientIP   = "X-Client-IP"
-	HeaderClientUA   = "X-Client-User-Agent"
+	CodeOriginNotAllowed     = "origin_not_allowed"
+	CodeUnsupportedMediaType = "unsupported_media_type"
 )
 
-// Handler serves the Console API (spec/console.yaml). It must only be reachable from the website.
-type Handler struct {
-	svc        *Service
-	log        *slog.Logger
-	serviceKey []byte
+// HandlerOptions says which sites may use the API and whose word to take for the visitor's address.
+type HandlerOptions struct {
+	// PortalOrigins and AdminOrigins are origins as browsers send them (scheme://host[:port], lower case).
+	PortalOrigins []string
+	AdminOrigins  []string
+	// TrustedProxies are the networks whose CF-Connecting-IP / X-Forwarded-For is believed (the ingress).
+	TrustedProxies []netip.Prefix
 }
 
-func NewHandler(svc *Service, serviceKey string, log *slog.Logger) *Handler {
-	return &Handler{svc: svc, log: log, serviceKey: []byte(serviceKey)}
+// Handler serves the Console API (spec/console.yaml) to the website's two apps, from the browser.
+type Handler struct {
+	svc     *Service
+	log     *slog.Logger
+	portal  map[string]bool
+	admin   map[string]bool
+	proxies []netip.Prefix
+}
+
+func NewHandler(svc *Service, opts HandlerOptions, log *slog.Logger) *Handler {
+	h := &Handler{svc: svc, log: log, portal: map[string]bool{}, admin: map[string]bool{}, proxies: opts.TrustedProxies}
+	for _, o := range opts.PortalOrigins {
+		h.portal[strings.ToLower(o)] = true
+	}
+	for _, o := range opts.AdminOrigins {
+		h.admin[strings.ToLower(o)] = true
+	}
+	return h
 }
 
 type ctxKey struct{}
 
-// Routes returns the API behind the service key.
+// Routes returns the API behind the request guard.
 func (h *Handler) Routes() http.Handler {
 	mux := http.NewServeMux()
 	open := func(f http.HandlerFunc) http.Handler { return f }
@@ -79,30 +102,61 @@ func (h *Handler) Routes() http.Handler {
 	mux.Handle("POST "+v+"/admin/projects/{project_id}/disable", authed(h.adminSetProjectDisabled))
 	mux.Handle("GET "+v+"/admin/stats", authed(h.adminStats))
 
-	return h.serviceKeyOnly(mux)
+	return h.guard(mux)
 }
 
-// serviceKeyOnly refuses anything that does not carry the website's key, before anything else is looked at.
-func (h *Handler) serviceKeyOnly(next http.Handler) http.Handler {
+// guard runs before anything else. Every answer is no-store (some carry secrets) and nosniff. A request that changes
+// something must come from the portal or the admin app (Origin, which a browser always sends on such a request and a
+// page cannot fake) and, when it has a body, be JSON, which a form on another site cannot send. Together with the
+// SameSite=Strict cookie this shuts out cross-site request forgery (PLAN D70).
+func (h *Handler) guard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if subtle.ConstantTimeCompare([]byte(r.Header.Get(HeaderServiceKey)), h.serviceKey) != 1 {
-			httpx.WriteError(w, r, http.StatusUnauthorized, httpx.CodeUnauthenticated, "missing or wrong service key")
-			return
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		switch r.Method {
+		case http.MethodGet, http.MethodHead:
+		default:
+			if _, ok := h.originScope(r); !ok {
+				httpx.WriteError(w, r, http.StatusForbidden, CodeOriginNotAllowed, "this request did not come from the Marpokat website")
+				return
+			}
+			if r.ContentLength != 0 || r.Header.Get("Content-Type") != "" {
+				if mt, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || mt != "application/json" {
+					httpx.WriteError(w, r, http.StatusUnsupportedMediaType, CodeUnsupportedMediaType, "send the body as application/json")
+					return
+				}
+			}
 		}
 		next.ServeHTTP(w, r)
 	})
 }
 
+// originScope says which app a request comes from, by its Origin header.
+func (h *Handler) originScope(r *http.Request) (Scope, bool) {
+	o := strings.ToLower(r.Header.Get("Origin"))
+	switch {
+	case o == "":
+		return "", false
+	case h.admin[o]:
+		return ScopeAdmin, true
+	case h.portal[o]:
+		return ScopePortal, true
+	}
+	return "", false
+}
+
 func (h *Handler) session(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		auth := r.Header.Get("Authorization")
-		token, ok := strings.CutPrefix(auth, "Bearer ")
-		if !ok {
+		c, err := r.Cookie(SessionCookie)
+		if err != nil || c.Value == "" {
 			httpx.WriteErr(w, r, h.log, errUnauthenticated)
 			return
 		}
-		p, err := h.svc.Authenticate(r.Context(), strings.TrimSpace(token))
+		p, err := h.svc.Authenticate(r.Context(), c.Value)
 		if err != nil {
+			if errors.Is(err, errUnauthenticated) { // ended or unknown: the browser can forget it
+				clearSessionCookie(w)
+			}
 			httpx.WriteErr(w, r, h.log, err)
 			return
 		}
@@ -110,16 +164,42 @@ func (h *Handler) session(next http.Handler) http.Handler {
 	})
 }
 
-func caller(r *http.Request) Caller {
-	ip := strings.TrimSpace(r.Header.Get(HeaderClientIP))
-	if net.ParseIP(ip) == nil { // the website did not say, or said something that is not an address
-		ip, _, _ = net.SplitHostPort(r.RemoteAddr)
+func setSessionCookie(w http.ResponseWriter, token string, until time.Time) {
+	http.SetCookie(w, &http.Cookie{
+		Name: SessionCookie, Value: token, Path: "/", Expires: until, MaxAge: max(int(time.Until(until).Seconds()), 1),
+		Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode,
+	})
+}
+
+func clearSessionCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name: SessionCookie, Value: "", Path: "/", MaxAge: -1, Secure: true, HttpOnly: true, SameSite: http.SameSiteStrictMode,
+	})
+}
+
+func (h *Handler) caller(r *http.Request) Caller {
+	return Caller{IP: h.clientIP(r), UserAgent: r.UserAgent()}
+}
+
+// clientIP is the visitor's address (PLAN D73). The headers that name it (CF-Connecting-IP from Cloudflare, then the
+// ingress's) are only believed when the connection comes from a trusted proxy; anyone else could write them to dodge
+// the limits or to put a false address in the audit log.
+func (h *Handler) clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
 	}
-	ua := r.Header.Get(HeaderClientUA)
-	if ua == "" {
-		ua = r.UserAgent()
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return host
 	}
-	return Caller{IP: ip, UserAgent: ua}
+	addr = addr.Unmap()
+	for _, p := range h.proxies {
+		if p.Contains(addr) {
+			return httpx.ClientIP(r)
+		}
+	}
+	return addr.String()
 }
 
 func (h *Handler) fail(w http.ResponseWriter, r *http.Request, err error) {
@@ -178,11 +258,14 @@ func pushOf(p PushStatus) pushJSON {
 // ---------------------------------------------------------------- auth
 
 func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
-	var in struct{ Email, Password, Name string }
+	var in struct {
+		Email, Password, Name string
+		TurnstileToken        string `json:"turnstile_token"`
+	}
 	if !httpx.DecodeJSON(w, r, &in) {
 		return
 	}
-	if err := h.svc.Register(r.Context(), in.Email, in.Password, in.Name, caller(r)); err != nil {
+	if err := h.svc.Register(r.Context(), in.Email, in.Password, in.Name, in.TurnstileToken, h.caller(r)); err != nil {
 		h.fail(w, r, err)
 		return
 	}
@@ -214,28 +297,35 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 	if !httpx.DecodeJSON(w, r, &in) {
 		return
 	}
-	res, err := h.svc.Login(r.Context(), in.Email, in.Password, caller(r))
+	scope, _ := h.originScope(r) // the guard made sure there is one
+	res, err := h.svc.Login(r.Context(), in.Email, in.Password, scope, h.caller(r))
 	if err != nil {
 		h.fail(w, r, err)
 		return
 	}
-	httpx.WriteJSON(w, http.StatusOK, map[string]any{"token": res.Token, "expires_at": res.ExpiresAt, "account": accountOf(res.Account)})
+	// the token goes into an HttpOnly cookie and nowhere else: no script on the page can read it
+	setSessionCookie(w, res.Token, res.AbsoluteExpiresAt)
+	httpx.WriteJSON(w, http.StatusOK, map[string]any{"expires_at": res.ExpiresAt, "scope": scope, "account": accountOf(res.Account)})
 }
 
 func (h *Handler) logout(w http.ResponseWriter, r *http.Request, p Principal) {
-	if err := h.svc.Logout(r.Context(), p, caller(r)); err != nil {
+	if err := h.svc.Logout(r.Context(), p, h.caller(r)); err != nil {
 		h.fail(w, r, err)
 		return
 	}
+	clearSessionCookie(w)
 	noContent(w)
 }
 
 func (h *Handler) forgotPassword(w http.ResponseWriter, r *http.Request) {
-	var in struct{ Email string }
+	var in struct {
+		Email          string
+		TurnstileToken string `json:"turnstile_token"`
+	}
 	if !httpx.DecodeJSON(w, r, &in) {
 		return
 	}
-	if err := h.svc.ForgotPassword(r.Context(), in.Email, caller(r)); err != nil {
+	if err := h.svc.ForgotPassword(r.Context(), in.Email, in.TurnstileToken, h.caller(r)); err != nil {
 		h.fail(w, r, err)
 		return
 	}
@@ -247,7 +337,7 @@ func (h *Handler) resetPassword(w http.ResponseWriter, r *http.Request) {
 	if !httpx.DecodeJSON(w, r, &in) {
 		return
 	}
-	if err := h.svc.ResetPassword(r.Context(), in.Token, in.Password, caller(r)); err != nil {
+	if err := h.svc.ResetPassword(r.Context(), in.Token, in.Password, h.caller(r)); err != nil {
 		h.fail(w, r, err)
 		return
 	}
@@ -285,7 +375,7 @@ func (h *Handler) changePassword(w http.ResponseWriter, r *http.Request, p Princ
 	if !httpx.DecodeJSON(w, r, &in) {
 		return
 	}
-	if err := h.svc.ChangePassword(r.Context(), p, in.CurrentPassword, in.NewPassword, caller(r)); err != nil {
+	if err := h.svc.ChangePassword(r.Context(), p, in.CurrentPassword, in.NewPassword, h.caller(r)); err != nil {
 		h.fail(w, r, err)
 		return
 	}
@@ -305,10 +395,11 @@ func (h *Handler) listSessions(w http.ResponseWriter, r *http.Request, p Princip
 		LastSeenAt time.Time `json:"last_seen_at"`
 		UserAgent  string    `json:"user_agent"`
 		IP         string    `json:"ip"`
+		Scope      string    `json:"scope"`
 	}
 	out := make([]item, len(rows))
 	for i, s := range rows {
-		out[i] = item{s.ID, s.ID == p.SessionID, s.CreatedAt, s.LastSeenAt, s.UserAgent, s.Ip}
+		out[i] = item{s.ID, s.ID == p.SessionID, s.CreatedAt, s.LastSeenAt, s.UserAgent, s.Ip, s.Scope}
 	}
 	httpx.WriteJSON(w, http.StatusOK, map[string]any{"sessions": out})
 }
@@ -357,7 +448,7 @@ func (h *Handler) createProject(w http.ResponseWriter, r *http.Request, p Princi
 	if !httpx.DecodeJSON(w, r, &in) {
 		return
 	}
-	res, err := h.svc.CreateProject(r.Context(), p, in.Name, in.Slug, caller(r))
+	res, err := h.svc.CreateProject(r.Context(), p, in.Name, in.Slug, h.caller(r))
 	if err != nil {
 		h.fail(w, r, err)
 		return
@@ -405,7 +496,7 @@ func (h *Handler) updateProject(w http.ResponseWriter, r *http.Request, p Princi
 	if !httpx.DecodeJSON(w, r, &in) {
 		return
 	}
-	row, err := h.svc.UpdateProject(r.Context(), p, id, ProjectUpdate{in.Name, in.ClientCanCreateDM, in.ClientCanCreateGroup}, caller(r))
+	row, err := h.svc.UpdateProject(r.Context(), p, id, ProjectUpdate{in.Name, in.ClientCanCreateDM, in.ClientCanCreateGroup}, h.caller(r))
 	if err != nil {
 		h.fail(w, r, err)
 		return
@@ -423,7 +514,7 @@ func (h *Handler) rotateSecret(w http.ResponseWriter, r *http.Request, p Princip
 	if !httpx.DecodeJSON(w, r, &in) {
 		return
 	}
-	secret, err := h.svc.RotateSecret(r.Context(), p, id, in.Password, caller(r))
+	secret, err := h.svc.RotateSecret(r.Context(), p, id, in.Password, h.caller(r))
 	if err != nil {
 		h.fail(w, r, err)
 		return
@@ -458,7 +549,7 @@ func (h *Handler) setPush(w http.ResponseWriter, r *http.Request, p Principal) {
 	if !httpx.DecodeJSON(w, r, &in) {
 		return
 	}
-	st, err := h.svc.SetPush(r.Context(), p, id, in.ServiceAccount, in.Password, caller(r))
+	st, err := h.svc.SetPush(r.Context(), p, id, in.ServiceAccount, in.Password, h.caller(r))
 	if err != nil {
 		h.fail(w, r, err)
 		return
@@ -476,7 +567,7 @@ func (h *Handler) removePush(w http.ResponseWriter, r *http.Request, p Principal
 	if !httpx.DecodeJSON(w, r, &in) {
 		return
 	}
-	if err := h.svc.RemovePush(r.Context(), p, id, in.Password, caller(r)); err != nil {
+	if err := h.svc.RemovePush(r.Context(), p, id, in.Password, h.caller(r)); err != nil {
 		h.fail(w, r, err)
 		return
 	}
@@ -496,7 +587,7 @@ func (h *Handler) setProjectDisabled(w http.ResponseWriter, r *http.Request, p P
 	if !httpx.DecodeJSON(w, r, &in) {
 		return
 	}
-	row, err := h.svc.SetProjectDisabled(r.Context(), p, id, in.Disabled, in.Password, caller(r))
+	row, err := h.svc.SetProjectDisabled(r.Context(), p, id, in.Disabled, in.Password, h.caller(r))
 	if err != nil {
 		h.fail(w, r, err)
 		return
@@ -547,7 +638,7 @@ func (h *Handler) adminSetAccountDisabled(w http.ResponseWriter, r *http.Request
 	if !httpx.DecodeJSON(w, r, &in) {
 		return
 	}
-	acc, err := h.svc.AdminSetAccountDisabled(r.Context(), p, id, in.Disabled, caller(r))
+	acc, err := h.svc.AdminSetAccountDisabled(r.Context(), p, id, in.Disabled, h.caller(r))
 	if err != nil {
 		h.fail(w, r, err)
 		return
@@ -583,7 +674,7 @@ func (h *Handler) adminSetProjectDisabled(w http.ResponseWriter, r *http.Request
 	if !httpx.DecodeJSON(w, r, &in) {
 		return
 	}
-	res, err := h.svc.AdminSetProjectDisabled(r.Context(), p, id, in.Disabled, caller(r))
+	res, err := h.svc.AdminSetProjectDisabled(r.Context(), p, id, in.Disabled, h.caller(r))
 	if err != nil {
 		h.fail(w, r, err)
 		return

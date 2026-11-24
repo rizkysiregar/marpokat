@@ -62,6 +62,8 @@ type Options struct {
 	BaseURL string
 	// MaxProjects is how many projects an account may have.
 	MaxProjects int
+	// Captcha checks sign up and password reset requests (PLAN D72). Nil: no check.
+	Captcha Captcha
 }
 
 type Service struct {
@@ -82,16 +84,25 @@ func NewService(q store.Querier, tenants *tenant.Service, mailer Mailer, limiter
 	return &Service{q: q, tenants: tenants, mailer: mailer, limiter: limiter, log: log.With("subsystem", "console"), opts: opts, now: time.Now}
 }
 
-// Caller is who a request comes from: the visitor's address and browser as the website reports them.
+// Caller is who a request comes from: the visitor's address and browser.
 type Caller struct {
 	IP        string
 	UserAgent string
 }
 
+// Scope is where a session was signed in (PLAN D71). Only an admin session can use the platform admin endpoints.
+type Scope string
+
+const (
+	ScopePortal Scope = "portal"
+	ScopeAdmin  Scope = "admin"
+)
+
 // Principal is a signed-in account and the session it signed in with.
 type Principal struct {
 	Account   store.Account
 	SessionID uuid.UUID
+	Scope     Scope
 }
 
 // ---------------------------------------------------------------- limits and helpers
@@ -114,6 +125,14 @@ func (s *Service) audit(ctx context.Context, accountID uuid.UUID, action string,
 }
 
 func strp(s string) *string { return &s }
+
+// human runs the robot check, when there is one.
+func (s *Service) human(ctx context.Context, token string, c Caller) error {
+	if s.opts.Captcha == nil {
+		return nil
+	}
+	return s.opts.Captcha.Verify(ctx, token, c.IP)
+}
 
 // sendMail does not hold up the request: a slow mail server must not make sign up slow. A failure is logged; the
 // person can ask for the e-mail again.
@@ -178,8 +197,10 @@ func (s *Service) link(path string, token string) string {
 
 // ---------------------------------------------------------------- sign up and e-mail
 
-// Register answers the same for a new and a known address, so that nobody can find out who has an account.
-func (s *Service) Register(ctx context.Context, rawEmail, password, rawName string, c Caller) error {
+// Register answers the same for a new and a known address, so that nobody can find out who has an account. The robot
+// check comes after the cheap checks, so that a typo does not cost the visitor another check, and after the limit, so
+// that a flood is not passed on to Cloudflare.
+func (s *Service) Register(ctx context.Context, rawEmail, password, rawName, captcha string, c Caller) error {
 	email, err := normalizeEmail(rawEmail)
 	if err != nil {
 		return err
@@ -192,6 +213,9 @@ func (s *Service) Register(ctx context.Context, rawEmail, password, rawName stri
 		return err
 	}
 	if err := s.within(ctx, 5, 5.0/3600, "register-ip", c.IP); err != nil {
+		return err
+	}
+	if err := s.human(ctx, captcha, c); err != nil {
 		return err
 	}
 	hash, err := hashPassword(password)
@@ -258,10 +282,17 @@ func (s *Service) ResendVerification(ctx context.Context, p Principal) error {
 type SessionResult struct {
 	Token     string
 	ExpiresAt time.Time
-	Account   store.Account
+	// AbsoluteExpiresAt is the latest the session can live: the cookie is kept that long, the server ends it sooner
+	// when it is idle.
+	AbsoluteExpiresAt time.Time
+	Account           store.Account
 }
 
-func (s *Service) Login(ctx context.Context, rawEmail, password string, c Caller) (SessionResult, error) {
+// Login starts a session. A sign in on the admin app (scope admin) is only for platform administrators.
+func (s *Service) Login(ctx context.Context, rawEmail, password string, scope Scope, c Caller) (SessionResult, error) {
+	if scope != ScopeAdmin {
+		scope = ScopePortal
+	}
 	email := strings.ToLower(strings.TrimSpace(rawEmail))
 	if email == "" || len(email) > 254 || password == "" || len(password) > 1024 {
 		return SessionResult{}, httpx.NewError(401, CodeInvalidCredentials, "wrong e-mail or password")
@@ -288,17 +319,25 @@ func (s *Service) Login(ctx context.Context, rawEmail, password string, c Caller
 	if acc.DisabledAt != nil {
 		return SessionResult{}, httpx.NewError(403, CodeAccountDisabled, "this account is disabled")
 	}
+	if scope == ScopeAdmin && !acc.IsPlatformAdmin {
+		s.audit(ctx, acc.ID, "admin_login_refused", nil, c)
+		return SessionResult{}, errAdminOnly
+	}
 	token := sessionPrefix + randomToken()
 	now := s.now()
 	expires := now.Add(sessionIdle)
 	if err := s.q.InsertSession(ctx, store.InsertSessionParams{
 		ID: uuid.Must(uuid.NewV7()), AccountID: acc.ID, TokenHash: hashToken(token), ExpiresAt: expires,
-		AbsoluteExpiresAt: now.Add(sessionAbsolute), UserAgent: truncate(c.UserAgent, 300), Ip: c.IP,
+		AbsoluteExpiresAt: now.Add(sessionAbsolute), UserAgent: truncate(c.UserAgent, 300), Ip: c.IP, Scope: string(scope),
 	}); err != nil {
 		return SessionResult{}, fmt.Errorf("console: start session: %w", err)
 	}
-	s.audit(ctx, acc.ID, "login", nil, c)
-	return SessionResult{Token: token, ExpiresAt: expires, Account: acc}, nil
+	action := "login"
+	if scope == ScopeAdmin {
+		action = "admin_login"
+	}
+	s.audit(ctx, acc.ID, action, nil, c)
+	return SessionResult{Token: token, ExpiresAt: expires, AbsoluteExpiresAt: now.Add(sessionAbsolute), Account: acc}, nil
 }
 
 func truncate(s string, n int) string {
@@ -335,7 +374,7 @@ func (s *Service) Authenticate(ctx context.Context, token string) (Principal, er
 			s.log.Warn("session not extended", "error", err)
 		}
 	}
-	return Principal{Account: acc, SessionID: sess.ID}, nil
+	return Principal{Account: acc, SessionID: sess.ID, Scope: Scope(sess.Scope)}, nil
 }
 
 func (s *Service) Logout(ctx context.Context, p Principal, c Caller) error {
@@ -365,7 +404,7 @@ func (s *Service) Audit(ctx context.Context, p Principal, limit int) ([]store.Co
 // ---------------------------------------------------------------- password
 
 // ForgotPassword always succeeds; a known address gets the link. Asking again replaces the earlier link.
-func (s *Service) ForgotPassword(ctx context.Context, rawEmail string, c Caller) error {
+func (s *Service) ForgotPassword(ctx context.Context, rawEmail, captcha string, c Caller) error {
 	email := strings.ToLower(strings.TrimSpace(rawEmail))
 	if email == "" || len(email) > 254 {
 		return nil
@@ -374,6 +413,9 @@ func (s *Service) ForgotPassword(ctx context.Context, rawEmail string, c Caller)
 		return err
 	}
 	if err := s.within(ctx, 3, 3.0/3600, "forgot-email", email); err != nil {
+		return err
+	}
+	if err := s.human(ctx, captcha, c); err != nil {
 		return err
 	}
 	acc, err := s.q.GetAccountByEmail(ctx, email)
@@ -746,11 +788,19 @@ func (s *Service) SetProjectDisabled(ctx context.Context, p Principal, id uuid.U
 
 // ---------------------------------------------------------------- platform admin
 
-var errForbidden = httpx.ErrForbidden("this is for platform administrators")
+var (
+	errForbidden    = httpx.ErrForbidden("this is for platform administrators")
+	errAdminOnly    = httpx.ErrForbidden("only platform administrators can sign in here")
+	errAdminSession = httpx.ErrForbidden("sign in on the admin site to do this")
+)
 
+// requireAdmin lets through a platform administrator who signed in on the admin app (PLAN D71).
 func requireAdmin(p Principal) error {
 	if !p.Account.IsPlatformAdmin {
 		return errForbidden
+	}
+	if p.Scope != ScopeAdmin {
+		return errAdminSession
 	}
 	return nil
 }

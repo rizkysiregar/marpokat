@@ -79,7 +79,9 @@ func TestLoadRequiresVariables(t *testing.T) {
 }
 
 func TestConsoleValidate(t *testing.T) {
-	good := Console{Addr: ":8081", ServiceKey: strings.Repeat("k", 32), BaseURL: "https://marpokat.example.com", MailDriver: "log"}
+	proxies := []string{"10.0.0.0/8", "127.0.0.0/8"}
+	good := Console{Addr: ":8081", BaseURL: "https://marpokat.example.com", MailDriver: "log", TrustedProxies: proxies,
+		AllowedOrigins: []string{"http://localhost:3000"}, AdminOrigins: []string{"https://admin.marpokat.example.com"}}
 	if err := good.Validate(); err != nil {
 		t.Fatalf("a good config was refused: %v", err)
 	}
@@ -87,17 +89,50 @@ func TestConsoleValidate(t *testing.T) {
 		t.Fatalf("a disabled console must not need anything: %v", err)
 	}
 	for name, mutate := range map[string]func(*Console){
-		"short key":         func(c *Console) { c.ServiceKey = "short" },
-		"no base url":       func(c *Console) { c.BaseURL = "" },
-		"bad base url":      func(c *Console) { c.BaseURL = "marpokat.example.com" },
-		"unknown driver":    func(c *Console) { c.MailDriver = "pigeon" },
-		"smtp without host": func(c *Console) { c.MailDriver = "smtp"; c.MailFrom = "a@b.co" },
-		"smtp without from": func(c *Console) { c.MailDriver = "smtp"; c.MailHost = "smtp.example.com" },
+		"no base url":              func(c *Console) { c.BaseURL = "" },
+		"bad base url":             func(c *Console) { c.BaseURL = "marpokat.example.com" },
+		"origin with a path":       func(c *Console) { c.AllowedOrigins = []string{"https://a.example.com/app"} },
+		"origin without a scheme":  func(c *Console) { c.AllowedOrigins = []string{"a.example.com"} },
+		"admin origin not a URL":   func(c *Console) { c.AdminOrigins = []string{"ftp://admin.example.com"} },
+		"admin on the portal host": func(c *Console) { c.AdminOrigins = []string{"https://MARPOKAT.example.com"} },
+		"bad proxy":                func(c *Console) { c.TrustedProxies = []string{"10.0.0.0"} },
+		"bad turnstile url":        func(c *Console) { c.TurnstileSecretKey = "s"; c.TurnstileVerifyURL = "nope" },
+		"unknown driver":           func(c *Console) { c.MailDriver = "pigeon" },
+		"smtp without host":        func(c *Console) { c.MailDriver = "smtp"; c.MailFrom = "a@b.co" },
+		"smtp without from":        func(c *Console) { c.MailDriver = "smtp"; c.MailHost = "smtp.example.com" },
 	} {
 		c := good
 		mutate(&c)
 		if err := c.Validate(); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+}
+
+func TestConsoleOriginsAndProxies(t *testing.T) {
+	c := Console{BaseURL: "https://Marpokat.example.com/some/page", AllowedOrigins: []string{" http://localhost:3000/ "},
+		AdminOrigins: []string{"https://Admin.example.com"}, TrustedProxies: []string{"10.1.2.3/8", " ", "::1/128"}}
+	portal, err := c.PortalOrigins()
+	if err != nil || len(portal) != 2 || portal[0] != "https://marpokat.example.com" || portal[1] != "http://localhost:3000" {
+		t.Fatalf("portal origins: %v %v", portal, err)
+	}
+	if admin, err := c.AdminOriginList(); err != nil || len(admin) != 1 || admin[0] != "https://admin.example.com" {
+		t.Fatalf("admin origins: %v %v", admin, err)
+	}
+	p, err := c.TrustedProxyPrefixes()
+	if err != nil || len(p) != 2 || p[0].String() != "10.0.0.0/8" {
+		t.Fatalf("proxies: %v %v", p, err)
+	}
+}
+
+func TestConsoleDefaultsTrustThePrivateRanges(t *testing.T) {
+	t.Setenv("CONSOLE_ADDR", ":8081")
+	c, err := Load[Console]()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := c.TrustedProxyPrefixes()
+	if err != nil || len(p) != 6 {
+		t.Fatalf("default proxies: %v %v", p, err)
 	}
 }

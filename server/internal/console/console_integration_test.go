@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"strings"
@@ -30,7 +31,10 @@ import (
 
 func TestMain(m *testing.M) { testdb.Main(m) }
 
-const serviceKey = "test-service-key-test-service-key-0123456789"
+const (
+	portalOrigin = "https://portal.test"
+	adminOrigin  = "https://admin.test"
+)
 
 // captureMailer keeps what would have been sent, so a test can follow the links.
 type captureMailer struct {
@@ -99,6 +103,11 @@ type env struct {
 
 func newEnv(t *testing.T, maxProjects int) *env {
 	t.Helper()
+	return newEnvWith(t, maxProjects, nil)
+}
+
+func newEnvWith(t *testing.T, maxProjects int, captcha Captcha) *env {
+	t.Helper()
 	pool := testdb.Pool(t)
 	rc := testdb.Redis(t)
 	rc.KeyPrefix = "console-" + uuid.NewString()[:8] + ":"
@@ -116,8 +125,13 @@ func newEnv(t *testing.T, maxProjects int) *env {
 	q := store.New(pool)
 	ts := tenant.NewService(q, box)
 	mailer := &captureMailer{}
-	svc := NewService(q, ts, mailer, ratelimit.New(rdb, log), log, Options{BaseURL: "https://marpokat.test", MaxProjects: maxProjects})
-	srv := httptest.NewServer(NewHandler(svc, serviceKey, log).Routes())
+	svc := NewService(q, ts, mailer, ratelimit.New(rdb, log), log, Options{BaseURL: "https://marpokat.test", MaxProjects: maxProjects, Captcha: captcha})
+	// the test client connects from loopback, which plays the ingress: its CF-Connecting-IP is believed
+	srv := httptest.NewServer(NewHandler(svc, HandlerOptions{
+		PortalOrigins:  []string{portalOrigin},
+		AdminOrigins:   []string{adminOrigin},
+		TrustedProxies: []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8"), netip.MustParsePrefix("::1/128")},
+	}, log).Routes())
 	t.Cleanup(srv.Close)
 	return &env{t: t, srv: srv, svc: svc, mail: mailer, q: q, tenant: ts}
 }
@@ -129,7 +143,14 @@ type reply struct {
 	header http.Header
 }
 
+// do calls the API the way the portal does: from its origin, JSON bodies, the session cookie, and the visitor's
+// address as Cloudflare names it. token is the value of the session cookie.
 func (e *env) do(method, path string, body any, token, ip string) reply {
+	e.t.Helper()
+	return e.doFrom(portalOrigin, method, path, body, token, ip)
+}
+
+func (e *env) doFrom(origin, method, path string, body any, token, ip string) reply {
 	e.t.Helper()
 	var rdr io.Reader
 	if body != nil {
@@ -137,12 +158,17 @@ func (e *env) do(method, path string, body any, token, ip string) reply {
 		rdr = bytes.NewReader(b)
 	}
 	req, _ := http.NewRequest(method, e.srv.URL+"/console/v1"+path, rdr)
-	req.Header.Set(HeaderServiceKey, serviceKey)
+	if method != "GET" {
+		req.Header.Set("Origin", origin)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+		req.AddCookie(&http.Cookie{Name: SessionCookie, Value: token})
 	}
 	if ip != "" {
-		req.Header.Set(HeaderClientIP, ip)
+		req.Header.Set("CF-Connecting-IP", ip)
 	}
 	res, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -182,31 +208,123 @@ func (e *env) signUp(email string, verify bool) string {
 
 func (e *env) login(email, password string) string {
 	e.t.Helper()
-	r := e.do("POST", "/auth/login", map[string]string{"email": email, "password": password}, "", "10.1.0."+uuid.NewString()[:2])
+	return e.loginFrom(portalOrigin, email, password)
+}
+
+// loginFrom signs in from an app and returns the session cookie it was given.
+func (e *env) loginFrom(origin, email, password string) string {
+	e.t.Helper()
+	r := e.doFrom(origin, "POST", "/auth/login", map[string]string{"email": email, "password": password}, "", "10.1.0."+uuid.NewString()[:2])
 	if r.status != 200 {
 		e.t.Fatalf("login %s: %d %s", email, r.status, r.raw)
 	}
-	return r.str("token")
+	c := r.cookie()
+	if c == nil || c.Value == "" {
+		e.t.Fatalf("login %s gave no session cookie: %v", email, r.header)
+	}
+	return c.Value
+}
+
+func (r reply) cookie() *http.Cookie {
+	for _, c := range (&http.Response{Header: r.header}).Cookies() {
+		if c.Name == SessionCookie {
+			return c
+		}
+	}
+	return nil
 }
 
 func uniqueEmail(prefix string) string { return prefix + "-" + uuid.NewString()[:8] + "@example.com" }
 
-func TestServiceKeyIsRequired(t *testing.T) {
+func TestTheSessionLivesInAnHttpOnlyCookie(t *testing.T) {
 	e := newEnv(t, 3)
-	for _, key := range []string{"", "wrong", serviceKey + "x"} {
-		req, _ := http.NewRequest("POST", e.srv.URL+"/console/v1/auth/login", strings.NewReader(`{}`))
-		if key != "" {
-			req.Header.Set(HeaderServiceKey, key)
-		}
-		res, err := http.DefaultClient.Do(req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if res.StatusCode != 401 {
-			t.Errorf("key %q: %d", key, res.StatusCode)
-		}
-		_ = res.Body.Close()
+	email := uniqueEmail("cookie")
+	e.signUp(email, false)
+
+	r := e.do("POST", "/auth/login", map[string]string{"email": email, "password": "a-good-password"}, "", "10.6.0.1")
+	c := r.cookie()
+	if r.status != 200 || c == nil || !c.HttpOnly || !c.Secure || c.SameSite != http.SameSiteStrictMode || c.Path != "/" || c.Domain != "" {
+		t.Fatalf("login: %d %v %+v", r.status, r.header, c)
 	}
+	if strings.Contains(r.raw, c.Value) || r.body["token"] != nil || r.str("scope") != "portal" {
+		t.Fatalf("the token is readable by the page: %s", r.raw)
+	}
+	if c.MaxAge < 29*24*3600 { // the cookie outlives the idle limit; the server ends an idle session itself
+		t.Fatalf("cookie max age: %d", c.MaxAge)
+	}
+	if me := e.do("GET", "/me", nil, c.Value, ""); me.status != 200 || me.str("email") != email {
+		t.Fatalf("me with the cookie: %d %s", me.status, me.raw)
+	}
+
+	// a session the server does not know any more is forgotten by the browser too
+	gone := e.do("GET", "/me", nil, "mpc_unknown", "")
+	if gone.status != 401 || gone.cookie() == nil || gone.cookie().MaxAge >= 0 {
+		t.Fatalf("unknown session: %d %v", gone.status, gone.header)
+	}
+	out := e.do("POST", "/auth/logout", nil, c.Value, "")
+	if out.status != 204 || out.cookie() == nil || out.cookie().MaxAge >= 0 {
+		t.Fatalf("logout does not clear the cookie: %d %v", out.status, out.header)
+	}
+	if r := e.do("GET", "/me", nil, c.Value, ""); r.status != 401 {
+		t.Fatalf("session after logout: %d", r.status)
+	}
+	// a request that changes something from another site never reaches the session, even with the cookie
+	if r := e.doFrom("https://evil.test", "PATCH", "/me", map[string]string{"name": "pwned"}, e.login(email, "a-good-password"), ""); r.status != 403 || r.code() != CodeOriginNotAllowed {
+		t.Fatalf("cross-site request: %d %s", r.status, r.raw)
+	}
+}
+
+// captchaStub accepts the token "human" and counts the checks.
+type captchaStub struct {
+	mu    sync.Mutex
+	calls int
+	ips   []string
+}
+
+func (c *captchaStub) Verify(_ context.Context, token, ip string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls++
+	c.ips = append(c.ips, ip)
+	if token != "human" {
+		return errCaptchaRefused
+	}
+	return nil
+}
+
+func TestSignUpAndPasswordResetAskForTheRobotCheck(t *testing.T) {
+	stub := &captchaStub{}
+	e := newEnvWith(t, 3, stub)
+	email := uniqueEmail("robot")
+
+	// invalid input is answered before the check, so that fixing a typo does not cost another one
+	if r := e.do("POST", "/auth/register", map[string]string{"email": "nope", "password": "a-good-password", "name": "x"}, "", "10.10.0.1"); r.status != 400 || stub.calls != 0 {
+		t.Fatalf("validation first: %d calls=%d", r.status, stub.calls)
+	}
+	if r := e.do("POST", "/auth/register", map[string]string{"email": email, "password": "a-good-password", "name": "Robot"}, "", "10.10.0.2"); r.status != 400 || r.code() != CodeCaptchaFailed {
+		t.Fatalf("no token: %d %s", r.status, r.raw)
+	}
+	if e.mail.count(email) != 0 {
+		t.Fatal("an account was made without the check")
+	}
+	if r := e.do("POST", "/auth/register", map[string]string{"email": email, "password": "a-good-password", "name": "Robot", "turnstile_token": "human"}, "", "203.0.113.77"); r.status != 201 {
+		t.Fatalf("with the check: %d %s", r.status, r.raw)
+	}
+	e.mail.to(t, email, "Confirm")
+	if last := stub.ips[len(stub.ips)-1]; last != "203.0.113.77" {
+		t.Fatalf("Cloudflare was given %q, not the visitor's address", last)
+	}
+
+	// sign in is not checked (it has its own limits)
+	e.login(email, "a-good-password")
+
+	if r := e.do("POST", "/auth/forgot-password", map[string]string{"email": email, "turnstile_token": "robot"}, "", "10.10.0.3"); r.status != 400 || r.code() != CodeCaptchaFailed {
+		t.Fatalf("forgot with a bad token: %d %s", r.status, r.raw)
+	}
+	if r := e.do("POST", "/auth/forgot-password", map[string]string{"email": email, "turnstile_token": "human"}, "", "10.10.0.4"); r.status != 204 {
+		t.Fatalf("forgot: %d %s", r.status, r.raw)
+	}
+	e.mail.to(t, email, "Reset")
 }
 
 func TestSignUpVerifyAndFirstProject(t *testing.T) {
@@ -635,6 +753,18 @@ func TestPlatformAdmin(t *testing.T) {
 	}
 	if r := e.do("GET", "/me", nil, admin, ""); r.body["is_platform_admin"] != true {
 		t.Fatalf("me: %s", r.raw)
+	}
+	// an administrator signed in on the portal cannot manage the platform from there (PLAN D71)
+	if r := e.do("GET", "/admin/stats", nil, admin, ""); r.status != 403 || !strings.Contains(r.raw, "admin site") {
+		t.Fatalf("admin endpoints with a portal session: %d %s", r.status, r.raw)
+	}
+	// only an administrator can sign in on the admin app
+	if r := e.doFrom(adminOrigin, "POST", "/auth/login", map[string]string{"email": userEmail, "password": "a-good-password"}, "", "10.5.5.6"); r.status != 403 || r.cookie() != nil {
+		t.Fatalf("a normal account signed in on the admin app: %d %s", r.status, r.raw)
+	}
+	admin = e.loginFrom(adminOrigin, adminEmail, "a-good-password")
+	if r := e.do("GET", "/me/sessions", nil, admin, ""); !strings.Contains(r.raw, `"scope":"admin"`) {
+		t.Fatalf("sessions: %s", r.raw)
 	}
 
 	projects := e.do("GET", "/admin/projects", nil, admin, "")
