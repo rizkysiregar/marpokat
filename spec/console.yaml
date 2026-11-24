@@ -49,12 +49,8 @@ info:
     Same shape as the chat API: `{ "error": { "code", "message", "details?" } }`. Limits answer `429 rate_limited`
     with `Retry-After`.
 servers:
-  - url: https://marpokat.rizkysiregar.my.id/console/v1
-    description: the portal (production)
-  - url: https://admin-marpokat.rizkysiregar.my.id/console/v1
-    description: the admin app (production)
-  - url: https://app-dev-marpokat.rizkysiregar.my.id/console/v1
-    description: the portal (development)
+  - url: /console/v1
+    description: On the host of the portal or the admin app (the ingress routes this path to the Console API)
 tags:
   - { name: Auth }
   - { name: Account }

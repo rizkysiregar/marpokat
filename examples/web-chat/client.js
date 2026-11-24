@@ -8,7 +8,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export class Chat {
   /**
    * @param {object} o
-   * @param {string} o.baseUrl   e.g. https://api-dev-marpokat.rizkysiregar.my.id
+   * @param {string} o.baseUrl   e.g. https://chat-api.example.com
    * @param {string} o.apiKey
    * @param {() => Promise<string>} o.getToken  gives a user token; called again when the last one has expired
    */
