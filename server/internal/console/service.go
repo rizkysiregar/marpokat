@@ -558,8 +558,12 @@ type ProjectWithSecret struct {
 	Secret  string
 }
 
-func (s *Service) CreateProject(ctx context.Context, p Principal, rawName, rawSlug string, c Caller) (ProjectWithSecret, error) {
+func (s *Service) CreateProject(ctx context.Context, p Principal, rawName, rawSlug, rawEnv string, c Caller) (ProjectWithSecret, error) {
 	name, err := validateName(rawName)
+	if err != nil {
+		return ProjectWithSecret{}, err
+	}
+	env, err := environmentOf(rawEnv)
 	if err != nil {
 		return ProjectWithSecret{}, err
 	}
@@ -595,6 +599,11 @@ func (s *Service) CreateProject(ctx context.Context, p Principal, rawName, rawSl
 			full, err := s.q.GetTenantByID(ctx, row.ID)
 			if err != nil {
 				return ProjectWithSecret{}, fmt.Errorf("console: load project: %w", err)
+			}
+			if env != nil {
+				if full, err = s.q.SetTenantEnvironment(ctx, store.SetTenantEnvironmentParams{ID: row.ID, Environment: env}); err != nil {
+					return ProjectWithSecret{}, fmt.Errorf("console: set label: %w", err)
+				}
 			}
 			s.audit(ctx, p.Account.ID, "project_created", strp(slug), c)
 			return ProjectWithSecret{Project: full, Secret: secret}, nil
@@ -663,6 +672,8 @@ type ProjectUpdate struct {
 	Name                 *string
 	ClientCanCreateDM    *bool
 	ClientCanCreateGroup *bool
+	// Environment: nil leaves it, "" clears it, otherwise development, staging or production (PLAN D78).
+	Environment *string
 }
 
 func (s *Service) UpdateProject(ctx context.Context, p Principal, id uuid.UUID, in ProjectUpdate, c Caller) (store.Tenant, error) {
@@ -693,6 +704,15 @@ func (s *Service) UpdateProject(ctx context.Context, p Principal, id uuid.UUID, 
 		}
 		if err := s.tenants.SetConfig(ctx, row.Slug, cfg); err != nil {
 			return store.Tenant{}, err
+		}
+	}
+	if in.Environment != nil {
+		env, err := environmentOf(*in.Environment)
+		if err != nil {
+			return store.Tenant{}, err
+		}
+		if _, err := s.q.SetTenantEnvironment(ctx, store.SetTenantEnvironmentParams{ID: row.ID, Environment: env}); err != nil {
+			return store.Tenant{}, fmt.Errorf("console: set label: %w", err)
 		}
 	}
 	s.audit(ctx, p.Account.ID, "project_updated", strp(row.Slug), c)
@@ -786,6 +806,9 @@ func (s *Service) SetProjectDisabled(ctx context.Context, p Principal, id uuid.U
 	}
 	if !disabled && row.DeleteAfter != nil {
 		return store.Tenant{}, errDeletionScheduled
+	}
+	if !disabled && row.SuspendedAt != nil {
+		return store.Tenant{}, errProjectSuspended
 	}
 	if err := s.confirm(ctx, p, password, c); err != nil {
 		return store.Tenant{}, err

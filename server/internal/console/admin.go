@@ -76,6 +76,8 @@ type AdminProjectView struct {
 	OwnerEmail *string
 	Usage      store.TenantUsageRow
 	Push       PushStatus
+	// OwnerIsAdmin: the owner is another platform administrator, out of reach of the admin actions (demote first).
+	OwnerIsAdmin bool
 }
 
 func (s *Service) AdminProject(ctx context.Context, p Principal, id uuid.UUID) (AdminProjectView, error) {
@@ -90,6 +92,11 @@ func (s *Service) AdminProject(ctx context.Context, p Principal, id uuid.UUID) (
 		return AdminProjectView{}, fmt.Errorf("console: project: %w", err)
 	}
 	v := AdminProjectView{Project: row.Tenant, OwnerEmail: row.OwnerEmail}
+	if row.Tenant.AccountID.Valid {
+		if owner, err := s.q.GetAccountByID(ctx, row.Tenant.AccountID.UUID); err == nil {
+			v.OwnerIsAdmin = owner.IsPlatformAdmin && owner.ID != p.Account.ID
+		}
+	}
 	if v.Usage, err = s.q.TenantUsage(ctx, id); err != nil {
 		return v, fmt.Errorf("console: usage: %w", err)
 	}

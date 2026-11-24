@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Marpokat Console API
-  version: 0.3.0
+  version: 0.4.0
   description: |
     The API behind the Marpokat website: the **portal** (landing, docs, sign up, project management) and the **admin**
     app (internal). Both are static apps that hold no data and no logic of their own: they call this API from the
@@ -255,6 +255,7 @@ paths:
               properties:
                 name: { type: string, minLength: 1, maxLength: 100 }
                 slug: { type: string, pattern: "^[a-z0-9][a-z0-9-]{1,62}$", description: "Chosen from the name when left out; a number is added when taken." }
+                environment: { $ref: "#/components/schemas/EnvironmentLabel" }
       responses:
         "201": { description: Created, content: { application/json: { schema: { $ref: "#/components/schemas/ProjectWithSecret" } } } }
         "400": { $ref: "#/components/responses/Validation" }
@@ -286,6 +287,7 @@ paths:
                 name: { type: string, minLength: 1, maxLength: 100 }
                 client_can_create_dm: { type: boolean }
                 client_can_create_group: { type: boolean }
+                environment: { $ref: "#/components/schemas/EnvironmentLabel" }
       responses:
         "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Project" } } } }
         "400": { $ref: "#/components/responses/Validation" }
@@ -395,6 +397,7 @@ paths:
       responses:
         "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Project" } } } }
         "403": { $ref: "#/components/responses/WrongPassword" }
+        "409": { description: "Not while it is being deleted (`deletion_scheduled`) or suspended by the platform admin (`project_suspended`)", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "404": { $ref: "#/components/responses/NotFound" }
   /admin/accounts:
     get:
@@ -472,7 +475,8 @@ paths:
   /admin/projects/{project_id}/disable:
     post:
       tags: [Platform admin]
-      summary: Disable or enable any project
+      summary: "Deprecated: switch any project off or on like its owner (the owner can undo it); use suspend"
+      deprecated: true
       operationId: adminSetProjectDisabled
       security: [{ session: [] }]
       parameters:
@@ -484,6 +488,80 @@ paths:
         "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/AdminProject" } } } }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /admin/projects/{project_id}/suspend:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Platform admin]
+      summary: Suspend a project
+      description: |
+        Keys refused and sockets closed at once on every pod, no pushes; the data stays. The owner gets an e-mail with
+        the reason, sees it on the project page, and cannot switch the project on until an admin lifts the suspension.
+        Not for a project of another platform administrator (`403 target_is_admin`: demote them first with the CLI).
+      operationId: adminSuspendProject
+      security: [{ session: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [reason], properties: { reason: { type: string, minLength: 1, maxLength: 500 } } } } }
+      responses:
+        "200": { description: Suspended, content: { application/json: { schema: { $ref: "#/components/schemas/Project" } } } }
+        "400": { $ref: "#/components/responses/Validation" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /admin/projects/{project_id}/unsuspend:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Platform admin]
+      summary: Lift a suspension
+      description: A project its owner had switched off stays off. The owner gets an e-mail.
+      operationId: adminUnsuspendProject
+      security: [{ session: [] }]
+      responses:
+        "200": { description: Lifted, content: { application/json: { schema: { $ref: "#/components/schemas/Project" } } } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /admin/projects/{project_id}/delete:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Platform admin]
+      summary: Delete a project, now or after the grace period
+      description: |
+        Switched off at once. With `now`, the worker removes it with all its data (users, conversations, messages,
+        files) within about a minute and it cannot be restored; without, it goes after the grace period like an owner's
+        deletion. The admin types the project's slug (`confirm`) and their own password. The owner gets an e-mail.
+      operationId: adminDeleteProject
+      security: [{ session: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [confirm, password]
+              properties:
+                confirm: { type: string, description: "The project's slug, typed out" }
+                password: { type: string, description: The administrator's own password }
+                now: { type: boolean, default: false }
+      responses:
+        "200": { description: Deleted (scheduled), content: { application/json: { schema: { $ref: "#/components/schemas/Project" } } } }
+        "400": { $ref: "#/components/responses/Validation" }
+        "403": { description: "Wrong password (`wrong_password`), not an admin, or another administrator's project (`target_is_admin`)", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /admin/projects/{project_id}/restore:
+    parameters:
+      - { $ref: "#/components/parameters/ProjectId" }
+    post:
+      tags: [Platform admin]
+      summary: Cancel a deletion that is still in its grace period
+      operationId: adminRestoreProject
+      security: [{ session: [] }]
+      responses:
+        "200": { description: Restored (still switched off), content: { application/json: { schema: { $ref: "#/components/schemas/Project" } } } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: Being removed right now (`deletion_scheduled`), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   /admin/stats:
     get:
       tags: [Platform admin]
@@ -561,6 +639,7 @@ paths:
                 properties:
                   project: { $ref: "#/components/schemas/AdminProject" }
                   owner_id: { type: [string, "null"], format: uuid }
+                  owner_is_admin: { type: boolean, description: "The owner is another platform administrator: the admin actions do not apply" }
                   usage: { type: object, properties: { users: { type: integer }, channels: { type: integer }, messages: { type: integer, format: int64 } } }
                   push: { $ref: "#/components/schemas/PushStatus" }
         "403": { $ref: "#/components/responses/Forbidden" }
@@ -617,6 +696,10 @@ components:
         is_platform_admin: { type: boolean }
         disabled: { type: boolean }
         created_at: { type: string, format: date-time }
+    EnvironmentLabel:
+      type: string
+      enum: [development, staging, production, ""]
+      description: A label for the project (empty for none). It changes nothing in how the project works.
     TurnstileToken:
       type: string
       maxLength: 2048
@@ -661,6 +744,9 @@ components:
         push_configured: { type: boolean }
         disabled: { type: boolean }
         delete_after: { type: [string, "null"], format: date-time, description: "When a deleted project is removed for good; null when it is not being deleted" }
+        environment: { type: [string, "null"], enum: [development, staging, production, null], description: "A label only: it changes nothing in how the project works" }
+        suspended: { type: boolean, description: "Suspended by the platform admin; only an admin can lift it" }
+        suspended_reason: { type: [string, "null"] }
         created_at: { type: string, format: date-time }
     ProjectWithSecret:
       allOf:

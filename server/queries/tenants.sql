@@ -5,8 +5,19 @@ INSERT INTO tenants (id, slug, name, api_key, api_secret_enc, config, account_id
 VALUES ($1, $2, $3, $4, $5, $6, $7)
 RETURNING *;
 
+-- A key works only while its tenant is neither switched off (by its owner) nor suspended (by the platform admin).
 -- name: GetTenantByAPIKey :one
-SELECT * FROM tenants WHERE api_key = $1 AND disabled_at IS NULL;
+SELECT * FROM tenants WHERE api_key = $1 AND disabled_at IS NULL AND suspended_at IS NULL;
+
+-- name: SetTenantSuspended :one
+UPDATE tenants
+SET suspended_at = CASE WHEN sqlc.arg(suspended)::boolean THEN coalesce(suspended_at, now()) ELSE NULL END,
+    suspended_reason = CASE WHEN sqlc.arg(suspended)::boolean THEN sqlc.narg(reason)::text ELSE NULL END
+WHERE id = sqlc.arg(id)
+RETURNING *;
+
+-- name: SetTenantEnvironment :one
+UPDATE tenants SET environment = sqlc.narg(environment)::text WHERE id = sqlc.arg(id) RETURNING *;
 
 -- name: GetTenantBySlug :one
 SELECT * FROM tenants WHERE slug = $1;

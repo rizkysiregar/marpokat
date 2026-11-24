@@ -42,3 +42,32 @@ func passwordChangedMessage(to, name string) Message {
 		HTML:    fmt.Sprintf(`<p>Hi %s,</p><p>The password of your Marpokat account was just changed and every other session was signed out. If it was not you, reset your password at once.</p>`, html.EscapeString(name)),
 	}
 }
+
+func projectSuspendedMessage(to, name, project, reason, link string) Message {
+	return Message{
+		To:      to,
+		Subject: fmt.Sprintf("Your Marpokat project %s is suspended", project),
+		Text: fmt.Sprintf("Hi %s,\n\nWe suspended your project %s. Its apps and backend cannot use Marpokat until the suspension is lifted. Nothing was deleted.\n\nReason: %s\n\n%s\n\nIf you think this is a mistake, reply to this e-mail.\n",
+			name, project, reason, link),
+		HTML: fmt.Sprintf(`<p>Hi %s,</p><p>We suspended your project <strong>%s</strong>. Its apps and backend cannot use Marpokat until the suspension is lifted. Nothing was deleted.</p><p>Reason: %s</p><p><a href="%s">Open the project</a></p><p>If you think this is a mistake, reply to this e-mail.</p>`,
+			html.EscapeString(name), html.EscapeString(project), html.EscapeString(reason), html.EscapeString(link)),
+	}
+}
+
+func projectUnsuspendedMessage(to, name, project string) Message {
+	return Message{
+		To:      to,
+		Subject: fmt.Sprintf("Your Marpokat project %s is no longer suspended", project),
+		Text:    fmt.Sprintf("Hi %s,\n\nThe suspension of your project %s is lifted. If you had switched it off yourself, it is still off: switch it on from the project page.\n", name, project),
+		HTML:    fmt.Sprintf(`<p>Hi %s,</p><p>The suspension of your project <strong>%s</strong> is lifted. If you had switched it off yourself, it is still off: switch it on from the project page.</p>`, html.EscapeString(name), html.EscapeString(project)),
+	}
+}
+
+func projectDeletedByAdminMessage(to, name, project, when string) Message {
+	return Message{
+		To:      to,
+		Subject: fmt.Sprintf("Your Marpokat project %s is deleted", project),
+		Text:    fmt.Sprintf("Hi %s,\n\nWe deleted your project %s. It is switched off, and it is removed for good with its users, conversations, messages and files %s.\n\nIf you think this is a mistake, reply to this e-mail.\n", name, project, when),
+		HTML:    fmt.Sprintf(`<p>Hi %s,</p><p>We deleted your project <strong>%s</strong>. It is switched off, and it is removed for good with its users, conversations, messages and files %s.</p><p>If you think this is a mistake, reply to this e-mail.</p>`, html.EscapeString(name), html.EscapeString(project), html.EscapeString(when)),
+	}
+}

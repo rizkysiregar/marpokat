@@ -190,6 +190,9 @@ type Tenant struct {
 	DisabledAt        *time.Time
 	AccountID         uuid.NullUUID
 	DeleteAfter       *time.Time
+	Environment       *string
+	SuspendedAt       *time.Time
+	SuspendedReason   *string
 }
 
 type User struct {

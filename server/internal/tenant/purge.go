@@ -26,7 +26,7 @@ type Purger struct {
 	Pool    *pgxpool.Pool
 	Objects ObjectRemover // nil: no object storage, nothing to remove there
 	Log     *slog.Logger
-	Every   time.Duration // default 10 minutes
+	Every   time.Duration // default 1 minute: an admin's "delete now" is done within it (PLAN D79)
 }
 
 // Once purges every project that is due and returns how many went.
@@ -94,7 +94,7 @@ func (p *Purger) one(ctx context.Context) (bool, error) {
 func (p *Purger) Run(ctx context.Context) {
 	every := p.Every
 	if every <= 0 {
-		every = 10 * time.Minute
+		every = time.Minute
 	}
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()

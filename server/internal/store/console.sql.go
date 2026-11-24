@@ -13,7 +13,7 @@ import (
 )
 
 const cancelTenantDeletion = `-- name: CancelTenantDeletion :one
-UPDATE tenants SET delete_after = NULL WHERE id = $1 RETURNING id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after
+UPDATE tenants SET delete_after = NULL WHERE id = $1 RETURNING id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after, environment, suspended_at, suspended_reason
 `
 
 // Restoring keeps the project switched off: the owner switches it on when ready.
@@ -35,6 +35,9 @@ func (q *Queries) CancelTenantDeletion(ctx context.Context, id uuid.UUID) (Tenan
 		&i.DisabledAt,
 		&i.AccountID,
 		&i.DeleteAfter,
+		&i.Environment,
+		&i.SuspendedAt,
+		&i.SuspendedReason,
 	)
 	return i, err
 }
@@ -282,7 +285,7 @@ func (q *Queries) GetSessionByHash(ctx context.Context, tokenHash []byte) (Conso
 }
 
 const getTenantOfAccount = `-- name: GetTenantOfAccount :one
-SELECT id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after FROM tenants WHERE id = $1 AND account_id = $2
+SELECT id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after, environment, suspended_at, suspended_reason FROM tenants WHERE id = $1 AND account_id = $2
 `
 
 type GetTenantOfAccountParams struct {
@@ -308,12 +311,15 @@ func (q *Queries) GetTenantOfAccount(ctx context.Context, arg GetTenantOfAccount
 		&i.DisabledAt,
 		&i.AccountID,
 		&i.DeleteAfter,
+		&i.Environment,
+		&i.SuspendedAt,
+		&i.SuspendedReason,
 	)
 	return i, err
 }
 
 const getTenantWithOwner = `-- name: GetTenantWithOwner :one
-SELECT t.id, t.slug, t.name, t.api_key, t.api_secret_enc, t.config, t.fcm_credentials_enc, t.webhook_url, t.webhook_secret_enc, t.created_at, t.updated_at, t.disabled_at, t.account_id, t.delete_after, a.email AS owner_email
+SELECT t.id, t.slug, t.name, t.api_key, t.api_secret_enc, t.config, t.fcm_credentials_enc, t.webhook_url, t.webhook_secret_enc, t.created_at, t.updated_at, t.disabled_at, t.account_id, t.delete_after, t.environment, t.suspended_at, t.suspended_reason, a.email AS owner_email
 FROM tenants t LEFT JOIN accounts a ON a.id = t.account_id
 WHERE t.id = $1
 `
@@ -341,6 +347,9 @@ func (q *Queries) GetTenantWithOwner(ctx context.Context, id uuid.UUID) (GetTena
 		&i.Tenant.DisabledAt,
 		&i.Tenant.AccountID,
 		&i.Tenant.DeleteAfter,
+		&i.Tenant.Environment,
+		&i.Tenant.SuspendedAt,
+		&i.Tenant.SuspendedReason,
 		&i.OwnerEmail,
 	)
 	return i, err
@@ -501,7 +510,7 @@ func (q *Queries) ListAccounts(ctx context.Context, arg ListAccountsParams) ([]A
 }
 
 const listAllTenantsWithOwner = `-- name: ListAllTenantsWithOwner :many
-SELECT t.id, t.slug, t.name, t.api_key, t.api_secret_enc, t.config, t.fcm_credentials_enc, t.webhook_url, t.webhook_secret_enc, t.created_at, t.updated_at, t.disabled_at, t.account_id, t.delete_after, a.email AS owner_email
+SELECT t.id, t.slug, t.name, t.api_key, t.api_secret_enc, t.config, t.fcm_credentials_enc, t.webhook_url, t.webhook_secret_enc, t.created_at, t.updated_at, t.disabled_at, t.account_id, t.delete_after, t.environment, t.suspended_at, t.suspended_reason, a.email AS owner_email
 FROM tenants t LEFT JOIN accounts a ON a.id = t.account_id
 ORDER BY t.created_at
 `
@@ -535,6 +544,9 @@ func (q *Queries) ListAllTenantsWithOwner(ctx context.Context) ([]ListAllTenants
 			&i.Tenant.DisabledAt,
 			&i.Tenant.AccountID,
 			&i.Tenant.DeleteAfter,
+			&i.Tenant.Environment,
+			&i.Tenant.SuspendedAt,
+			&i.Tenant.SuspendedReason,
 			&i.OwnerEmail,
 		); err != nil {
 			return nil, err
@@ -642,7 +654,7 @@ func (q *Queries) ListPlatformAudit(ctx context.Context, arg ListPlatformAuditPa
 }
 
 const listTenantsOfAccount = `-- name: ListTenantsOfAccount :many
-SELECT id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after FROM tenants WHERE account_id = $1 ORDER BY created_at
+SELECT id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after, environment, suspended_at, suspended_reason FROM tenants WHERE account_id = $1 ORDER BY created_at
 `
 
 func (q *Queries) ListTenantsOfAccount(ctx context.Context, accountID uuid.NullUUID) ([]Tenant, error) {
@@ -669,6 +681,9 @@ func (q *Queries) ListTenantsOfAccount(ctx context.Context, accountID uuid.NullU
 			&i.DisabledAt,
 			&i.AccountID,
 			&i.DeleteAfter,
+			&i.Environment,
+			&i.SuspendedAt,
+			&i.SuspendedReason,
 		); err != nil {
 			return nil, err
 		}
@@ -851,7 +866,7 @@ const scheduleTenantDeletion = `-- name: ScheduleTenantDeletion :one
 UPDATE tenants
 SET delete_after = coalesce(delete_after, $1::timestamptz), disabled_at = coalesce(disabled_at, now())
 WHERE id = $2
-RETURNING id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after
+RETURNING id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after, environment, suspended_at, suspended_reason
 `
 
 type ScheduleTenantDeletionParams struct {
@@ -878,6 +893,9 @@ func (q *Queries) ScheduleTenantDeletion(ctx context.Context, arg ScheduleTenant
 		&i.DisabledAt,
 		&i.AccountID,
 		&i.DeleteAfter,
+		&i.Environment,
+		&i.SuspendedAt,
+		&i.SuspendedReason,
 	)
 	return i, err
 }
@@ -934,6 +952,36 @@ func (q *Queries) SetAccountPlatformAdmin(ctx context.Context, arg SetAccountPla
 	var id uuid.UUID
 	err := row.Scan(&id)
 	return id, err
+}
+
+const setTenantDeleteNow = `-- name: SetTenantDeleteNow :one
+UPDATE tenants SET delete_after = now(), disabled_at = coalesce(disabled_at, now()) WHERE id = $1 RETURNING id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after, environment, suspended_at, suspended_reason
+`
+
+// The platform admin's "delete now": the date is moved to now even when the project was already scheduled.
+func (q *Queries) SetTenantDeleteNow(ctx context.Context, id uuid.UUID) (Tenant, error) {
+	row := q.db.QueryRow(ctx, setTenantDeleteNow, id)
+	var i Tenant
+	err := row.Scan(
+		&i.ID,
+		&i.Slug,
+		&i.Name,
+		&i.ApiKey,
+		&i.ApiSecretEnc,
+		&i.Config,
+		&i.FcmCredentialsEnc,
+		&i.WebhookUrl,
+		&i.WebhookSecretEnc,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.DisabledAt,
+		&i.AccountID,
+		&i.DeleteAfter,
+		&i.Environment,
+		&i.SuspendedAt,
+		&i.SuspendedReason,
+	)
+	return i, err
 }
 
 const tenantUsage = `-- name: TenantUsage :one

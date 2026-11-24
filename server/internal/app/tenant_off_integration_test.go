@@ -74,3 +74,25 @@ func TestSwitchingATenantOffClosesItsSocketsEverywhere(t *testing.T) {
 	}
 	e.connect(1, doomed, "alice")
 }
+
+// A suspension by the platform admin closes the sockets the same way, and its keys are refused at once.
+func TestSuspendingATenantClosesItsSockets(t *testing.T) {
+	e := newRealtimeEnv(t, 2, nil)
+	tt := e.createTenant(tenant.Config{})
+	e.seed(tt, "alice")
+	alice := e.connect(1, tt, "alice")
+	tenants := e.tenants.WithNotifier(realtime.NewTenantNotifier(e.pods[0].rdb))
+	if err := tenants.SetSuspended(context.Background(), tt.ID, true, "spam"); err != nil {
+		t.Fatal(err)
+	}
+	if code := alice.waitClose(2 * time.Second); code != realtime.CloseAuthFailed {
+		t.Fatalf("closed with %d", code)
+	}
+	if r := e.on(1).asUser(tt, "alice", "GET", "/v1/me", nil); r.status != 401 {
+		t.Fatalf("key accepted while suspended: %d", r.status)
+	}
+	if err := tenants.SetSuspended(context.Background(), tt.ID, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	e.connect(0, tt, "alice")
+}
