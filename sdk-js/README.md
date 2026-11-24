@@ -31,5 +31,11 @@ npm run typecheck && npm test && npm run build
 MP_URL=... MP_KEY=... MP_TOKEN_ALICE=... MP_TOKEN_BOB=... MP_CHANNEL=... node packages/core/e2e/live.mjs
 ```
 
-Publishing goes to GitHub Packages (`npm.pkg.github.com`, scope `@rizkysiregar`); log in with a token that has
-`write:packages`.
+Publishing goes to GitHub Packages (`npm.pkg.github.com`, scope `@rizkysiregar`):
+
+```bash
+make publish     # refuses uncommitted changes and versions already published, tests, builds, publishes both
+```
+
+Raise the versions in `packages/*/package.json` first. The token comes from `GITHUB_PACKAGES_TOKEN` or the GitHub CLI
+(`write:packages`); it is written to a temporary npm config only.
