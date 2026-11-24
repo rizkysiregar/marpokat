@@ -57,6 +57,9 @@ public class MarpokatOptions(
 
 private const val PROTOCOL_VERSION = 1
 private const val MAX_BACKOFF_MS = 30_000.0
+private const val MAX_PUSH_RETRY_MS = 300_000.0
+/** A push token the server accepted is sent again after this long, on the next connection: servers trim old ones. */
+private const val PUSH_TOKEN_REFRESH_MS = 24 * 60 * 60 * 1000L
 
 /**
  * The Marpokat client: one WebSocket, the REST API and the state a chat screen needs. It keeps the rules of
@@ -106,6 +109,10 @@ public class MarpokatClient(private val options: MarpokatOptions) {
     private val syncing = HashMap<String, Deferred<Unit>>()
     private var channelsLoading: Deferred<Unit>? = null
     private var lastTypingMs: Long? = null
+    private var pushToken: String? = null // what the app asked to register
+    private var pushTokenSentAt: Long? = null // when the server accepted pushToken, null while it has not
+    private var pushJob: Job? = null
+    private var pushAttempt = 0
 
     // ------------------------------------------------------------------ connection
     /** Starts connecting and returns at once; follow [ChatState.status]. */
@@ -134,6 +141,7 @@ public class MarpokatClient(private val options: MarpokatOptions) {
             typing.values.forEach { m -> m.values.forEach { it.cancel() } }
             typing.clear()
             me = null; current = null; token = ""
+            pushJob?.cancel(); pushJob = null; pushToken = null; pushTokenSentAt = null; pushAttempt = 0
             status = ConnectionStatus.Idle
             publish()
         }
@@ -233,10 +241,20 @@ public class MarpokatClient(private val options: MarpokatOptions) {
             setStatus(ConnectionStatus.Connected, "sync failed: ${e.message}")
         }
         pending.values.filter { it.status == PendingStatus.Sending }.forEach { transmit(it) } // 7.6: same client_msg_id
+        // a token still waiting for its retry goes now that the server is reachable; one already accepted goes again
+        // once a day, so the server keeps it as a device in use, not on every reconnect
+        val sentAt = pushTokenSentAt
+        if (pushToken != null && (sentAt == null || options.nowMs() - sentAt >= PUSH_TOKEN_REFRESH_MS)) {
+            pushJob?.cancel()
+            pushAttempt = 0
+            pushJob = scope.launch { sendPushToken() }
+        }
     }
 
     // ------------------------------------------------------------------ REST
     private suspend fun api(method: String, path: String, body: JsonObject? = null, retried: Boolean = false): String {
+        // before the first connection there is no token yet: a request without one would only be refused
+        if (token.isEmpty()) token = options.tokenProvider.token()
         val headers = buildMap {
             put("X-Api-Key", options.apiKey)
             put("Authorization", "Bearer $token")
@@ -598,16 +616,67 @@ public class MarpokatClient(private val options: MarpokatOptions) {
     }
 
     // ------------------------------------------------------------------ push tokens
-    /** Call on login and whenever FCM gives the app a new token. */
+    /**
+     * Call on login and whenever FCM gives the app a new token; calling it before [connect] is fine. The client keeps
+     * the token: it is sent at once (with a token from the provider when there is no connection yet), retried with
+     * backoff while the server cannot be reached, and sent again on the first connection of every day, so the
+     * server keeps it as a device in use. Returns once the server accepted it or it is kept for later.
+     *
+     * @throws MarpokatException when the server refuses the token itself (400): it is not kept, sending it again
+     * cannot help.
+     */
     public suspend fun registerPushToken(pushToken: String): Unit = withContext(loop) {
-        api("POST", "/v1/devices", buildJsonObject { put("platform", "android"); put("push_token", pushToken) })
+        pushJob?.cancel()
+        this@MarpokatClient.pushToken = pushToken
+        pushTokenSentAt = null
+        pushAttempt = 0
+        sendPushToken(throwRefusal = true)
+    }
+
+    /** Call on logout, before [reset], so that the phone stops getting pushes for this user. */
+    public suspend fun unregisterPushToken(pushToken: String): Unit = withContext(loop) {
+        if (this@MarpokatClient.pushToken == pushToken) {
+            pushJob?.cancel(); pushJob = null
+            this@MarpokatClient.pushToken = null
+            pushTokenSentAt = null
+        }
+        api("DELETE", "/v1/devices/${enc(pushToken)}")
         Unit
     }
 
-    /** Call on logout, so that the phone stops getting pushes for this user. */
-    public suspend fun unregisterPushToken(pushToken: String): Unit = withContext(loop) {
-        api("DELETE", "/v1/devices/${enc(pushToken)}")
-        Unit
+    /** Sends [pushToken] once; when that fails for a reason that can pass, plans the next attempt. Runs on `loop`. */
+    private suspend fun sendPushToken(throwRefusal: Boolean = false) {
+        val wanted = pushToken ?: return
+        try {
+            api("POST", "/v1/devices", buildJsonObject { put("platform", "android"); put("push_token", wanted) })
+            if (pushToken == wanted) {
+                pushTokenSentAt = options.nowMs()
+                pushAttempt = 0
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: MarpokatException) {
+            if (e.status == 400) { // the token itself is refused
+                if (pushToken == wanted) pushToken = null
+                if (throwRefusal) throw e
+                return
+            }
+            // overloaded or down: try again soon. Refused credentials (401, 403): kept for the next connection, which
+            // gets a token that works, rather than asking again and again with one that does not
+            if (e.status == 429 || e.status >= 500) retryPushToken(wanted)
+        } catch (e: Exception) { // network, or no token from the provider yet
+            retryPushToken(wanted)
+        }
+    }
+
+    private fun retryPushToken(wanted: String) {
+        if (pushToken != wanted) return
+        val delayMs = min(MAX_PUSH_RETRY_MS, options.backoffBaseMs * 2.0.pow(pushAttempt)).toLong()
+        pushAttempt++
+        pushJob = scope.launch {
+            delay(delayMs)
+            if (pushToken == wanted) sendPushToken()
+        }
     }
 
     // ------------------------------------------------------------------ state and cache

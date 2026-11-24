@@ -206,6 +206,10 @@ func (p *Processor) Handle(ctx context.Context, env broker.Envelope, _ broker.De
 				if derr := p.Q.DeleteDeviceByToken(ctx, store.DeleteDeviceByTokenParams{TenantID: tenantID, PushToken: d.PushToken}); derr != nil {
 					p.Log.Warn("cannot remove the device", "error", derr)
 				}
+			case errors.Is(err, ErrProjectMismatch):
+				p.count("project_mismatch")
+				p.Log.Error("push refused: the tenant's Firebase credentials are of another project than the app's token, device kept",
+					"tenant_id", tenantID, "user_id", r.id, "platform", d.Platform, "error", err)
 			default:
 				var se *SendError
 				if errors.As(err, &se) && !se.Retryable {

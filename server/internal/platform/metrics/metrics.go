@@ -104,7 +104,7 @@ func New(version string) *Registry {
 		}, []string{"platform"}),
 		PushFailed: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "marpokat_push_failed_total",
-			Help: "Push notifications FCM did not accept: invalid_token (the device was removed), retryable, permanent.",
+			Help: "Push notifications FCM did not accept: invalid_token (the device was removed), project_mismatch (tenant credentials of another Firebase project), retryable, permanent.",
 		}, []string{"reason"}),
 		PushSkipped: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "marpokat_push_skipped_total",
