@@ -85,6 +85,8 @@ func (h *Handler) Routes() http.Handler {
 	mux.Handle("GET "+v+"/me", authed(h.getMe))
 	mux.Handle("PATCH "+v+"/me", authed(h.updateMe))
 	mux.Handle("PUT "+v+"/me/password", authed(h.changePassword))
+	mux.Handle("DELETE "+v+"/me", authed(h.deleteMe))
+	mux.Handle("POST "+v+"/me/restore", authed(h.restoreMe))
 	mux.Handle("GET "+v+"/me/sessions", authed(h.listSessions))
 	mux.Handle("DELETE "+v+"/me/sessions/{session_id}", authed(h.endSession))
 	mux.Handle("GET "+v+"/me/audit", authed(h.listAudit))
@@ -104,6 +106,10 @@ func (h *Handler) Routes() http.Handler {
 	mux.Handle("GET "+v+"/admin/accounts", authed(h.adminAccounts))
 	mux.Handle("GET "+v+"/admin/accounts/{account_id}", authed(h.adminAccount))
 	mux.Handle("POST "+v+"/admin/accounts/{account_id}/sign-out", authed(h.adminEndSessions))
+	mux.Handle("POST "+v+"/admin/accounts/{account_id}/suspend", authed(h.adminSuspendAccount))
+	mux.Handle("POST "+v+"/admin/accounts/{account_id}/unsuspend", authed(h.adminUnsuspendAccount))
+	mux.Handle("POST "+v+"/admin/accounts/{account_id}/delete", authed(h.adminDeleteAccount))
+	mux.Handle("POST "+v+"/admin/accounts/{account_id}/restore", authed(h.adminRestoreAccount))
 	mux.Handle("POST "+v+"/admin/accounts/{account_id}/disable", authed(h.adminSetAccountDisabled))
 	mux.Handle("GET "+v+"/admin/projects", authed(h.adminProjects))
 	mux.Handle("GET "+v+"/admin/projects/{project_id}", authed(h.adminProject))
@@ -232,11 +238,16 @@ type accountJSON struct {
 	IsPlatformAdmin bool      `json:"is_platform_admin"`
 	Disabled        bool      `json:"disabled"`
 	CreatedAt       time.Time `json:"created_at"`
+	// Suspended is the same as Disabled (kept for older clients), with the reason the admin gave.
+	Suspended       bool       `json:"suspended"`
+	SuspendedReason *string    `json:"suspended_reason"`
+	DeleteAfter     *time.Time `json:"delete_after"`
 }
 
 func accountOf(a store.Account) accountJSON {
 	return accountJSON{ID: a.ID, Email: a.Email, Name: a.Name, EmailVerified: a.EmailVerifiedAt != nil,
-		IsPlatformAdmin: a.IsPlatformAdmin, Disabled: a.DisabledAt != nil, CreatedAt: a.CreatedAt}
+		IsPlatformAdmin: a.IsPlatformAdmin, Disabled: a.DisabledAt != nil, CreatedAt: a.CreatedAt,
+		Suspended: a.DisabledAt != nil, SuspendedReason: a.SuspendedReason, DeleteAfter: a.DeleteAfter}
 }
 
 type projectJSON struct {
@@ -970,5 +981,79 @@ func (h *Handler) adminDeleteProject(w http.ResponseWriter, r *http.Request, p P
 func (h *Handler) adminRestoreProject(w http.ResponseWriter, r *http.Request, p Principal) {
 	h.adminProjectAction(w, r, func(id uuid.UUID) (store.Tenant, error) {
 		return h.svc.AdminRestoreProject(r.Context(), p, id, h.caller(r))
+	})
+}
+
+// ---------------------------------------------------------------- control over accounts (PLAN D80)
+
+func (h *Handler) deleteMe(w http.ResponseWriter, r *http.Request, p Principal) {
+	var in struct{ Confirm, Password string }
+	if !httpx.DecodeJSON(w, r, &in) {
+		return
+	}
+	acc, err := h.svc.DeleteMyAccount(r.Context(), p, in.Confirm, in.Password, h.caller(r))
+	if err != nil {
+		h.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusAccepted, accountOf(acc))
+}
+
+func (h *Handler) restoreMe(w http.ResponseWriter, r *http.Request, p Principal) {
+	acc, err := h.svc.RestoreMyAccount(r.Context(), p, h.caller(r))
+	if err != nil {
+		h.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, accountOf(acc))
+}
+
+func (h *Handler) adminAccountAction(w http.ResponseWriter, r *http.Request, act func(uuid.UUID) (store.Account, error)) {
+	id, err := httpx.PathUUID(r, "account_id")
+	if err != nil {
+		h.fail(w, r, errAccountNotFound)
+		return
+	}
+	acc, err := act(id)
+	if err != nil {
+		h.fail(w, r, err)
+		return
+	}
+	httpx.WriteJSON(w, http.StatusOK, accountOf(acc))
+}
+
+func (h *Handler) adminSuspendAccount(w http.ResponseWriter, r *http.Request, p Principal) {
+	var in struct{ Reason string }
+	if !httpx.DecodeJSON(w, r, &in) {
+		return
+	}
+	h.adminAccountAction(w, r, func(id uuid.UUID) (store.Account, error) {
+		return h.svc.AdminSuspendAccount(r.Context(), p, id, in.Reason, h.caller(r))
+	})
+}
+
+func (h *Handler) adminUnsuspendAccount(w http.ResponseWriter, r *http.Request, p Principal) {
+	h.adminAccountAction(w, r, func(id uuid.UUID) (store.Account, error) {
+		return h.svc.AdminUnsuspendAccount(r.Context(), p, id, h.caller(r))
+	})
+}
+
+func (h *Handler) adminDeleteAccount(w http.ResponseWriter, r *http.Request, p Principal) {
+	var in struct {
+		Confirm  string
+		Password string
+		Now      bool
+	}
+	if !httpx.DecodeJSON(w, r, &in) {
+		return
+	}
+	h.adminAccountAction(w, r, func(id uuid.UUID) (store.Account, error) {
+		return h.svc.AdminDeleteAccount(r.Context(), p, id, in.Confirm, in.Password, in.Now, h.caller(r))
+	})
+}
+
+func (h *Handler) adminRestoreAccount(w http.ResponseWriter, r *http.Request, p Principal) {
+	h.adminAccountAction(w, r, func(id uuid.UUID) (store.Account, error) {
+		return h.svc.AdminRestoreAccount(r.Context(), p, id, h.caller(r))
 	})
 }

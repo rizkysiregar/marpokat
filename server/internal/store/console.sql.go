@@ -12,8 +12,31 @@ import (
 	"github.com/google/uuid"
 )
 
+const cancelAccountDeletion = `-- name: CancelAccountDeletion :one
+UPDATE accounts SET delete_after = NULL WHERE id = $1 RETURNING id, email, name, password_hash, email_verified_at, is_platform_admin, disabled_at, created_at, updated_at, suspended_reason, delete_after
+`
+
+func (q *Queries) CancelAccountDeletion(ctx context.Context, id uuid.UUID) (Account, error) {
+	row := q.db.QueryRow(ctx, cancelAccountDeletion, id)
+	var i Account
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.Name,
+		&i.PasswordHash,
+		&i.EmailVerifiedAt,
+		&i.IsPlatformAdmin,
+		&i.DisabledAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.SuspendedReason,
+		&i.DeleteAfter,
+	)
+	return i, err
+}
+
 const cancelTenantDeletion = `-- name: CancelTenantDeletion :one
-UPDATE tenants SET delete_after = NULL WHERE id = $1 RETURNING id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after, environment, suspended_at, suspended_reason
+UPDATE tenants SET delete_after = NULL WHERE id = $1 RETURNING id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after, environment, suspended_at, suspended_reason, suspension_source
 `
 
 // Restoring keeps the project switched off: the owner switches it on when ready.
@@ -38,6 +61,7 @@ func (q *Queries) CancelTenantDeletion(ctx context.Context, id uuid.UUID) (Tenan
 		&i.Environment,
 		&i.SuspendedAt,
 		&i.SuspendedReason,
+		&i.SuspensionSource,
 	)
 	return i, err
 }
@@ -103,7 +127,7 @@ func (q *Queries) CountTenantsOfAccount(ctx context.Context, accountID uuid.Null
 
 const createAccount = `-- name: CreateAccount :one
 
-INSERT INTO accounts (id, email, name, password_hash) VALUES ($1, $2, $3, $4) RETURNING id, email, name, password_hash, email_verified_at, is_platform_admin, disabled_at, created_at, updated_at
+INSERT INTO accounts (id, email, name, password_hash) VALUES ($1, $2, $3, $4) RETURNING id, email, name, password_hash, email_verified_at, is_platform_admin, disabled_at, created_at, updated_at, suspended_reason, delete_after
 `
 
 type CreateAccountParams struct {
@@ -132,8 +156,20 @@ func (q *Queries) CreateAccount(ctx context.Context, arg CreateAccountParams) (A
 		&i.DisabledAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.SuspendedReason,
+		&i.DeleteAfter,
 	)
 	return i, err
+}
+
+const deleteAccountRow = `-- name: DeleteAccountRow :exec
+DELETE FROM accounts WHERE id = $1
+`
+
+// Sessions, tokens and the security log go with it (ON DELETE CASCADE).
+func (q *Queries) DeleteAccountRow(ctx context.Context, id uuid.UUID) error {
+	_, err := q.db.Exec(ctx, deleteAccountRow, id)
+	return err
 }
 
 const deleteAccountSessions = `-- name: DeleteAccountSessions :exec
@@ -221,7 +257,7 @@ func (q *Queries) DeleteTenantRow(ctx context.Context, id uuid.UUID) error {
 }
 
 const getAccountByEmail = `-- name: GetAccountByEmail :one
-SELECT id, email, name, password_hash, email_verified_at, is_platform_admin, disabled_at, created_at, updated_at FROM accounts WHERE lower(email) = lower($1)
+SELECT id, email, name, password_hash, email_verified_at, is_platform_admin, disabled_at, created_at, updated_at, suspended_reason, delete_after FROM accounts WHERE lower(email) = lower($1)
 `
 
 func (q *Queries) GetAccountByEmail(ctx context.Context, lower string) (Account, error) {
@@ -237,12 +273,14 @@ func (q *Queries) GetAccountByEmail(ctx context.Context, lower string) (Account,
 		&i.DisabledAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.SuspendedReason,
+		&i.DeleteAfter,
 	)
 	return i, err
 }
 
 const getAccountByID = `-- name: GetAccountByID :one
-SELECT id, email, name, password_hash, email_verified_at, is_platform_admin, disabled_at, created_at, updated_at FROM accounts WHERE id = $1
+SELECT id, email, name, password_hash, email_verified_at, is_platform_admin, disabled_at, created_at, updated_at, suspended_reason, delete_after FROM accounts WHERE id = $1
 `
 
 func (q *Queries) GetAccountByID(ctx context.Context, id uuid.UUID) (Account, error) {
@@ -258,6 +296,8 @@ func (q *Queries) GetAccountByID(ctx context.Context, id uuid.UUID) (Account, er
 		&i.DisabledAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.SuspendedReason,
+		&i.DeleteAfter,
 	)
 	return i, err
 }
@@ -285,7 +325,7 @@ func (q *Queries) GetSessionByHash(ctx context.Context, tokenHash []byte) (Conso
 }
 
 const getTenantOfAccount = `-- name: GetTenantOfAccount :one
-SELECT id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after, environment, suspended_at, suspended_reason FROM tenants WHERE id = $1 AND account_id = $2
+SELECT id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after, environment, suspended_at, suspended_reason, suspension_source FROM tenants WHERE id = $1 AND account_id = $2
 `
 
 type GetTenantOfAccountParams struct {
@@ -314,12 +354,13 @@ func (q *Queries) GetTenantOfAccount(ctx context.Context, arg GetTenantOfAccount
 		&i.Environment,
 		&i.SuspendedAt,
 		&i.SuspendedReason,
+		&i.SuspensionSource,
 	)
 	return i, err
 }
 
 const getTenantWithOwner = `-- name: GetTenantWithOwner :one
-SELECT t.id, t.slug, t.name, t.api_key, t.api_secret_enc, t.config, t.fcm_credentials_enc, t.webhook_url, t.webhook_secret_enc, t.created_at, t.updated_at, t.disabled_at, t.account_id, t.delete_after, t.environment, t.suspended_at, t.suspended_reason, a.email AS owner_email
+SELECT t.id, t.slug, t.name, t.api_key, t.api_secret_enc, t.config, t.fcm_credentials_enc, t.webhook_url, t.webhook_secret_enc, t.created_at, t.updated_at, t.disabled_at, t.account_id, t.delete_after, t.environment, t.suspended_at, t.suspended_reason, t.suspension_source, a.email AS owner_email
 FROM tenants t LEFT JOIN accounts a ON a.id = t.account_id
 WHERE t.id = $1
 `
@@ -350,6 +391,7 @@ func (q *Queries) GetTenantWithOwner(ctx context.Context, id uuid.UUID) (GetTena
 		&i.Tenant.Environment,
 		&i.Tenant.SuspendedAt,
 		&i.Tenant.SuspendedReason,
+		&i.Tenant.SuspensionSource,
 		&i.OwnerEmail,
 	)
 	return i, err
@@ -465,7 +507,7 @@ func (q *Queries) ListAccountSessions(ctx context.Context, accountID uuid.UUID) 
 }
 
 const listAccounts = `-- name: ListAccounts :many
-SELECT id, email, name, password_hash, email_verified_at, is_platform_admin, disabled_at, created_at, updated_at FROM accounts
+SELECT id, email, name, password_hash, email_verified_at, is_platform_admin, disabled_at, created_at, updated_at, suspended_reason, delete_after FROM accounts
 WHERE id > $1::uuid
   AND ($2::text = '' OR email ILIKE $2::text OR name ILIKE $2::text)
 ORDER BY id
@@ -478,7 +520,6 @@ type ListAccountsParams struct {
 	MaxRows int32
 }
 
-// Accounts in id order, optionally only those whose e-mail or name contains the search (an ILIKE pattern, escaped).
 func (q *Queries) ListAccounts(ctx context.Context, arg ListAccountsParams) ([]Account, error) {
 	rows, err := q.db.Query(ctx, listAccounts, arg.After, arg.Pattern, arg.MaxRows)
 	if err != nil {
@@ -498,6 +539,8 @@ func (q *Queries) ListAccounts(ctx context.Context, arg ListAccountsParams) ([]A
 			&i.DisabledAt,
 			&i.CreatedAt,
 			&i.UpdatedAt,
+			&i.SuspendedReason,
+			&i.DeleteAfter,
 		); err != nil {
 			return nil, err
 		}
@@ -510,7 +553,7 @@ func (q *Queries) ListAccounts(ctx context.Context, arg ListAccountsParams) ([]A
 }
 
 const listAllTenantsWithOwner = `-- name: ListAllTenantsWithOwner :many
-SELECT t.id, t.slug, t.name, t.api_key, t.api_secret_enc, t.config, t.fcm_credentials_enc, t.webhook_url, t.webhook_secret_enc, t.created_at, t.updated_at, t.disabled_at, t.account_id, t.delete_after, t.environment, t.suspended_at, t.suspended_reason, a.email AS owner_email
+SELECT t.id, t.slug, t.name, t.api_key, t.api_secret_enc, t.config, t.fcm_credentials_enc, t.webhook_url, t.webhook_secret_enc, t.created_at, t.updated_at, t.disabled_at, t.account_id, t.delete_after, t.environment, t.suspended_at, t.suspended_reason, t.suspension_source, a.email AS owner_email
 FROM tenants t LEFT JOIN accounts a ON a.id = t.account_id
 ORDER BY t.created_at
 `
@@ -547,6 +590,7 @@ func (q *Queries) ListAllTenantsWithOwner(ctx context.Context) ([]ListAllTenants
 			&i.Tenant.Environment,
 			&i.Tenant.SuspendedAt,
 			&i.Tenant.SuspendedReason,
+			&i.Tenant.SuspensionSource,
 			&i.OwnerEmail,
 		); err != nil {
 			return nil, err
@@ -653,8 +697,37 @@ func (q *Queries) ListPlatformAudit(ctx context.Context, arg ListPlatformAuditPa
 	return items, nil
 }
 
+const listTenantIDsOfAccount = `-- name: ListTenantIDsOfAccount :many
+SELECT id, slug FROM tenants WHERE account_id = $1
+`
+
+type ListTenantIDsOfAccountRow struct {
+	ID   uuid.UUID
+	Slug string
+}
+
+func (q *Queries) ListTenantIDsOfAccount(ctx context.Context, accountID uuid.NullUUID) ([]ListTenantIDsOfAccountRow, error) {
+	rows, err := q.db.Query(ctx, listTenantIDsOfAccount, accountID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []ListTenantIDsOfAccountRow{}
+	for rows.Next() {
+		var i ListTenantIDsOfAccountRow
+		if err := rows.Scan(&i.ID, &i.Slug); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listTenantsOfAccount = `-- name: ListTenantsOfAccount :many
-SELECT id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after, environment, suspended_at, suspended_reason FROM tenants WHERE account_id = $1 ORDER BY created_at
+SELECT id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after, environment, suspended_at, suspended_reason, suspension_source FROM tenants WHERE account_id = $1 ORDER BY created_at
 `
 
 func (q *Queries) ListTenantsOfAccount(ctx context.Context, accountID uuid.NullUUID) ([]Tenant, error) {
@@ -684,6 +757,7 @@ func (q *Queries) ListTenantsOfAccount(ctx context.Context, accountID uuid.NullU
 			&i.Environment,
 			&i.SuspendedAt,
 			&i.SuspendedReason,
+			&i.SuspensionSource,
 		); err != nil {
 			return nil, err
 		}
@@ -693,6 +767,27 @@ func (q *Queries) ListTenantsOfAccount(ctx context.Context, accountID uuid.NullU
 		return nil, err
 	}
 	return items, nil
+}
+
+const lockDueAccountDeletion = `-- name: LockDueAccountDeletion :one
+SELECT id, email FROM accounts
+WHERE delete_after IS NOT NULL AND delete_after <= now()
+ORDER BY delete_after
+LIMIT 1
+FOR UPDATE SKIP LOCKED
+`
+
+type LockDueAccountDeletionRow struct {
+	ID    uuid.UUID
+	Email string
+}
+
+// The next account whose grace period is over, locked so that two workers never purge the same one.
+func (q *Queries) LockDueAccountDeletion(ctx context.Context) (LockDueAccountDeletionRow, error) {
+	row := q.db.QueryRow(ctx, lockDueAccountDeletion)
+	var i LockDueAccountDeletionRow
+	err := row.Scan(&i.ID, &i.Email)
+	return i, err
 }
 
 const lockDueTenantDeletion = `-- name: LockDueTenantDeletion :one
@@ -862,11 +957,40 @@ func (q *Queries) PurgeTenantUsers(ctx context.Context, tenantID uuid.UUID) erro
 	return err
 }
 
+const scheduleAccountDeletion = `-- name: ScheduleAccountDeletion :one
+UPDATE accounts SET delete_after = coalesce(delete_after, $1::timestamptz) WHERE id = $2 RETURNING id, email, name, password_hash, email_verified_at, is_platform_admin, disabled_at, created_at, updated_at, suspended_reason, delete_after
+`
+
+type ScheduleAccountDeletionParams struct {
+	DeleteAfter time.Time
+	ID          uuid.UUID
+}
+
+// An account to delete; one already scheduled keeps its date.
+func (q *Queries) ScheduleAccountDeletion(ctx context.Context, arg ScheduleAccountDeletionParams) (Account, error) {
+	row := q.db.QueryRow(ctx, scheduleAccountDeletion, arg.DeleteAfter, arg.ID)
+	var i Account
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.Name,
+		&i.PasswordHash,
+		&i.EmailVerifiedAt,
+		&i.IsPlatformAdmin,
+		&i.DisabledAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.SuspendedReason,
+		&i.DeleteAfter,
+	)
+	return i, err
+}
+
 const scheduleTenantDeletion = `-- name: ScheduleTenantDeletion :one
 UPDATE tenants
 SET delete_after = coalesce(delete_after, $1::timestamptz), disabled_at = coalesce(disabled_at, now())
 WHERE id = $2
-RETURNING id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after, environment, suspended_at, suspended_reason
+RETURNING id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after, environment, suspended_at, suspended_reason, suspension_source
 `
 
 type ScheduleTenantDeletionParams struct {
@@ -896,6 +1020,30 @@ func (q *Queries) ScheduleTenantDeletion(ctx context.Context, arg ScheduleTenant
 		&i.Environment,
 		&i.SuspendedAt,
 		&i.SuspendedReason,
+		&i.SuspensionSource,
+	)
+	return i, err
+}
+
+const setAccountDeleteNow = `-- name: SetAccountDeleteNow :one
+UPDATE accounts SET delete_after = now() WHERE id = $1 RETURNING id, email, name, password_hash, email_verified_at, is_platform_admin, disabled_at, created_at, updated_at, suspended_reason, delete_after
+`
+
+func (q *Queries) SetAccountDeleteNow(ctx context.Context, id uuid.UUID) (Account, error) {
+	row := q.db.QueryRow(ctx, setAccountDeleteNow, id)
+	var i Account
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.Name,
+		&i.PasswordHash,
+		&i.EmailVerifiedAt,
+		&i.IsPlatformAdmin,
+		&i.DisabledAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.SuspendedReason,
+		&i.DeleteAfter,
 	)
 	return i, err
 }
@@ -904,7 +1052,7 @@ const setAccountDisabled = `-- name: SetAccountDisabled :one
 UPDATE accounts
 SET disabled_at = CASE WHEN $1::boolean THEN coalesce(disabled_at, now()) ELSE NULL END
 WHERE id = $2
-RETURNING id, email, name, password_hash, email_verified_at, is_platform_admin, disabled_at, created_at, updated_at
+RETURNING id, email, name, password_hash, email_verified_at, is_platform_admin, disabled_at, created_at, updated_at, suspended_reason, delete_after
 `
 
 type SetAccountDisabledParams struct {
@@ -925,6 +1073,8 @@ func (q *Queries) SetAccountDisabled(ctx context.Context, arg SetAccountDisabled
 		&i.DisabledAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.SuspendedReason,
+		&i.DeleteAfter,
 	)
 	return i, err
 }
@@ -954,8 +1104,42 @@ func (q *Queries) SetAccountPlatformAdmin(ctx context.Context, arg SetAccountPla
 	return id, err
 }
 
+const setAccountSuspended = `-- name: SetAccountSuspended :one
+UPDATE accounts
+SET disabled_at = CASE WHEN $1::boolean THEN coalesce(disabled_at, now()) ELSE NULL END,
+    suspended_reason = CASE WHEN $1::boolean THEN $2::text ELSE NULL END
+WHERE id = $3
+RETURNING id, email, name, password_hash, email_verified_at, is_platform_admin, disabled_at, created_at, updated_at, suspended_reason, delete_after
+`
+
+type SetAccountSuspendedParams struct {
+	Suspended bool
+	Reason    *string
+	ID        uuid.UUID
+}
+
+// Accounts in id order, optionally only those whose e-mail or name contains the search (an ILIKE pattern, escaped).
+func (q *Queries) SetAccountSuspended(ctx context.Context, arg SetAccountSuspendedParams) (Account, error) {
+	row := q.db.QueryRow(ctx, setAccountSuspended, arg.Suspended, arg.Reason, arg.ID)
+	var i Account
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.Name,
+		&i.PasswordHash,
+		&i.EmailVerifiedAt,
+		&i.IsPlatformAdmin,
+		&i.DisabledAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.SuspendedReason,
+		&i.DeleteAfter,
+	)
+	return i, err
+}
+
 const setTenantDeleteNow = `-- name: SetTenantDeleteNow :one
-UPDATE tenants SET delete_after = now(), disabled_at = coalesce(disabled_at, now()) WHERE id = $1 RETURNING id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after, environment, suspended_at, suspended_reason
+UPDATE tenants SET delete_after = now(), disabled_at = coalesce(disabled_at, now()) WHERE id = $1 RETURNING id, slug, name, api_key, api_secret_enc, config, fcm_credentials_enc, webhook_url, webhook_secret_enc, created_at, updated_at, disabled_at, account_id, delete_after, environment, suspended_at, suspended_reason, suspension_source
 `
 
 // The platform admin's "delete now": the date is moved to now even when the project was already scheduled.
@@ -980,6 +1164,7 @@ func (q *Queries) SetTenantDeleteNow(ctx context.Context, id uuid.UUID) (Tenant,
 		&i.Environment,
 		&i.SuspendedAt,
 		&i.SuspendedReason,
+		&i.SuspensionSource,
 	)
 	return i, err
 }
@@ -1067,7 +1252,7 @@ func (q *Queries) TouchSession(ctx context.Context, arg TouchSessionParams) erro
 }
 
 const updateAccountName = `-- name: UpdateAccountName :one
-UPDATE accounts SET name = $2 WHERE id = $1 RETURNING id, email, name, password_hash, email_verified_at, is_platform_admin, disabled_at, created_at, updated_at
+UPDATE accounts SET name = $2 WHERE id = $1 RETURNING id, email, name, password_hash, email_verified_at, is_platform_admin, disabled_at, created_at, updated_at, suspended_reason, delete_after
 `
 
 type UpdateAccountNameParams struct {
@@ -1088,6 +1273,8 @@ func (q *Queries) UpdateAccountName(ctx context.Context, arg UpdateAccountNamePa
 		&i.DisabledAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.SuspendedReason,
+		&i.DeleteAfter,
 	)
 	return i, err
 }

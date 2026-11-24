@@ -20,6 +20,8 @@ type Account struct {
 	DisabledAt      *time.Time
 	CreatedAt       time.Time
 	UpdatedAt       time.Time
+	SuspendedReason *string
+	DeleteAfter     *time.Time
 }
 
 type AccountToken struct {
@@ -193,6 +195,7 @@ type Tenant struct {
 	Environment       *string
 	SuspendedAt       *time.Time
 	SuspendedReason   *string
+	SuspensionSource  *string
 }
 
 type User struct {

@@ -9,12 +9,26 @@ RETURNING *;
 -- name: GetTenantByAPIKey :one
 SELECT * FROM tenants WHERE api_key = $1 AND disabled_at IS NULL AND suspended_at IS NULL;
 
+-- A suspension of the project itself (the platform admin, source 'project').
 -- name: SetTenantSuspended :one
 UPDATE tenants
 SET suspended_at = CASE WHEN sqlc.arg(suspended)::boolean THEN coalesce(suspended_at, now()) ELSE NULL END,
-    suspended_reason = CASE WHEN sqlc.arg(suspended)::boolean THEN sqlc.narg(reason)::text ELSE NULL END
+    suspended_reason = CASE WHEN sqlc.arg(suspended)::boolean THEN sqlc.narg(reason)::text ELSE NULL END,
+    suspension_source = CASE WHEN sqlc.arg(suspended)::boolean THEN 'project' ELSE NULL END
 WHERE id = sqlc.arg(id)
 RETURNING *;
+
+-- The projects of an account that is suspended or being deleted. Those already suspended keep their own reason.
+-- name: SuspendTenantsOfAccount :many
+UPDATE tenants SET suspended_at = now(), suspended_reason = sqlc.arg(reason)::text, suspension_source = 'account'
+WHERE account_id = sqlc.arg(account_id)::uuid AND suspended_at IS NULL
+RETURNING id;
+
+-- Lifts only what the account caused; a suspension the admin put on a project stays.
+-- name: LiftAccountSuspensionsOfTenants :many
+UPDATE tenants SET suspended_at = NULL, suspended_reason = NULL, suspension_source = NULL
+WHERE account_id = $1 AND suspension_source = 'account'
+RETURNING id;
 
 -- name: SetTenantEnvironment :one
 UPDATE tenants SET environment = sqlc.narg(environment)::text WHERE id = sqlc.arg(id) RETURNING *;

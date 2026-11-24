@@ -329,7 +329,11 @@ func (s *Service) Login(ctx context.Context, rawEmail, password string, scope Sc
 		return SessionResult{}, httpx.NewError(401, CodeInvalidCredentials, "wrong e-mail or password")
 	}
 	if acc.DisabledAt != nil {
-		return SessionResult{}, httpx.NewError(403, CodeAccountDisabled, "this account is disabled")
+		msg := "this account is suspended"
+		if acc.SuspendedReason != nil {
+			msg += ": " + *acc.SuspendedReason
+		}
+		return SessionResult{}, httpx.NewError(403, CodeAccountDisabled, "%s", msg)
 	}
 	if scope == ScopeAdmin && !acc.IsPlatformAdmin {
 		s.audit(ctx, acc.ID, "admin_login_refused", nil, c)
@@ -574,6 +578,9 @@ func (s *Service) CreateProject(ctx context.Context, p Principal, rawName, rawSl
 	}
 	if p.Account.EmailVerifiedAt == nil {
 		return ProjectWithSecret{}, httpx.NewError(403, CodeEmailNotVerified, "confirm your e-mail address first")
+	}
+	if p.Account.DeleteAfter != nil {
+		return ProjectWithSecret{}, errAccountDeleting
 	}
 	if err := s.within(ctx, 5, 5.0/3600, "create-project", p.Account.ID.String()); err != nil {
 		return ProjectWithSecret{}, err
@@ -855,29 +862,12 @@ func (s *Service) AdminAccounts(ctx context.Context, p Principal, search string,
 	return rows, nil
 }
 
+// AdminSetAccountDisabled is the old switch of the admin app (deprecated): it suspends or lifts, like the new actions.
 func (s *Service) AdminSetAccountDisabled(ctx context.Context, p Principal, id uuid.UUID, disabled bool, c Caller) (store.Account, error) {
-	if err := requireAdmin(p); err != nil {
-		return store.Account{}, err
-	}
-	if id == p.Account.ID && disabled {
-		return store.Account{}, httpx.FieldErrors{"disabled": "you cannot disable your own account"}
-	}
-	acc, err := s.q.SetAccountDisabled(ctx, store.SetAccountDisabledParams{ID: id, Disabled: disabled})
-	if errors.Is(err, pgx.ErrNoRows) {
-		return store.Account{}, httpx.ErrNotFound("account not found")
-	}
-	if err != nil {
-		return store.Account{}, fmt.Errorf("console: disable account: %w", err)
-	}
 	if disabled {
-		_ = s.q.DeleteAccountSessions(ctx, id)
+		return s.AdminSuspendAccount(ctx, p, id, "Suspended by an administrator.", c)
 	}
-	action := "account_enabled_by_admin"
-	if disabled {
-		action = "account_disabled_by_admin"
-	}
-	s.audit(ctx, p.Account.ID, action, strp(acc.Email), c)
-	return acc, nil
+	return s.AdminUnsuspendAccount(ctx, p, id, c)
 }
 
 type AdminProject struct {

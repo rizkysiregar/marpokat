@@ -1,7 +1,7 @@
 openapi: 3.1.0
 info:
   title: Marpokat Console API
-  version: 0.4.0
+  version: 0.5.0
   description: |
     The API behind the Marpokat website: the **portal** (landing, docs, sign up, project management) and the **admin**
     app (internal). Both are static apps that hold no data and no logic of their own: they call this API from the
@@ -187,6 +187,31 @@ paths:
       responses:
         "200": { description: OK, content: { application/json: { schema: { $ref: "#/components/schemas/Account" } } } }
         "400": { $ref: "#/components/responses/Validation" }
+    delete:
+      tags: [Account]
+      summary: Delete your account and all its projects, after the grace period
+      description: |
+        Always after the grace period (3 days by default): its projects stop at once, and you can still sign in and
+        restore it until then. You type your e-mail (`confirm`) and your password. An e-mail confirms it.
+      operationId: deleteMe
+      security: [{ session: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [confirm, password], properties: { confirm: { type: string }, password: { type: string } } } } }
+      responses:
+        "202": { description: Scheduled, content: { application/json: { schema: { $ref: "#/components/schemas/Account" } } } }
+        "400": { $ref: "#/components/responses/Validation" }
+        "403": { $ref: "#/components/responses/WrongPassword" }
+  /me/restore:
+    post:
+      tags: [Account]
+      summary: Cancel the deletion of your account
+      description: Only during the grace period. Its projects run again (unless the admin suspended one of them).
+      operationId: restoreMe
+      security: [{ session: [] }]
+      responses:
+        "200": { description: Restored, content: { application/json: { schema: { $ref: "#/components/schemas/Account" } } } }
+        "409": { description: Being removed right now (`account_deletion_scheduled`), content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   /me/password:
     put:
       tags: [Account]
@@ -447,11 +472,78 @@ paths:
         "400": { description: Not your own account, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
         "403": { $ref: "#/components/responses/Forbidden" }
         "404": { $ref: "#/components/responses/NotFound" }
+  /admin/accounts/{account_id}/suspend:
+    post:
+      tags: [Platform admin]
+      summary: Suspend an account and every project of it
+      description: |
+        No sign in, every session ended, its projects stopped (keys refused, sockets closed). The e-mail stays taken.
+        The owner gets an e-mail with the reason. Not for yourself (400) or another platform administrator
+        (`403 target_is_admin`: demote them first with the CLI).
+      operationId: adminSuspendAccount
+      security: [{ session: [] }]
+      parameters:
+        - { name: account_id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [reason], properties: { reason: { type: string, minLength: 1, maxLength: 500 } } } } }
+      responses:
+        "200": { description: Suspended, content: { application/json: { schema: { $ref: "#/components/schemas/Account" } } } }
+        "400": { $ref: "#/components/responses/Validation" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /admin/accounts/{account_id}/unsuspend:
+    post:
+      tags: [Platform admin]
+      summary: Lift an account's suspension
+      description: Its projects run again, except one the admin suspended on its own.
+      operationId: adminUnsuspendAccount
+      security: [{ session: [] }]
+      parameters:
+        - { name: account_id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: Lifted, content: { application/json: { schema: { $ref: "#/components/schemas/Account" } } } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /admin/accounts/{account_id}/delete:
+    post:
+      tags: [Platform admin]
+      summary: Delete an account with all its projects, now or after the grace period
+      description: |
+        Sessions end and projects stop at once. With `now` the worker removes the account and everything in its
+        projects within about a minute; without, after the grace period (restorable until then). The admin types the
+        account's e-mail (`confirm`) and their own password. The owner gets an e-mail.
+      operationId: adminDeleteAccount
+      security: [{ session: [] }]
+      parameters:
+        - { name: account_id, in: path, required: true, schema: { type: string, format: uuid } }
+      requestBody:
+        required: true
+        content: { application/json: { schema: { type: object, required: [confirm, password], properties: { confirm: { type: string }, password: { type: string }, now: { type: boolean, default: false } } } } }
+      responses:
+        "200": { description: Deleted (scheduled), content: { application/json: { schema: { $ref: "#/components/schemas/Account" } } } }
+        "400": { $ref: "#/components/responses/Validation" }
+        "403": { description: "Wrong password, not an admin, or another administrator (`target_is_admin`)", content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /admin/accounts/{account_id}/restore:
+    post:
+      tags: [Platform admin]
+      summary: Cancel an account's deletion that is still in its grace period
+      operationId: adminRestoreAccount
+      security: [{ session: [] }]
+      parameters:
+        - { name: account_id, in: path, required: true, schema: { type: string, format: uuid } }
+      responses:
+        "200": { description: Restored, content: { application/json: { schema: { $ref: "#/components/schemas/Account" } } } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { description: Being removed right now, content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } } }
   /admin/accounts/{account_id}/disable:
     post:
       tags: [Platform admin]
-      summary: Disable or enable an account
-      description: A disabled account cannot sign in and its sessions end. Its projects keep running unless disabled themselves.
+      summary: "Deprecated: use suspend / unsuspend"
+      deprecated: true
+      description: Suspends (with a generic reason) or lifts, exactly like the newer actions.
       operationId: adminSetAccountDisabled
       security: [{ session: [] }]
       parameters:
@@ -694,7 +786,10 @@ components:
         name: { type: string }
         email_verified: { type: boolean }
         is_platform_admin: { type: boolean }
-        disabled: { type: boolean }
+        disabled: { type: boolean, description: "Same as suspended (kept for older clients)" }
+        suspended: { type: boolean, description: "Suspended by the platform admin: cannot sign in, its projects are stopped" }
+        suspended_reason: { type: [string, "null"] }
+        delete_after: { type: [string, "null"], format: date-time, description: "When a deleted account is removed for good with its projects" }
         created_at: { type: string, format: date-time }
     EnvironmentLabel:
       type: string
