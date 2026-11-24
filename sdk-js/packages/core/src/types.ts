@@ -92,6 +92,9 @@ export interface Snapshot {
   unreadTotal: number;
 }
 
+/** Where a push token comes from: `web` for a browser (Firebase web push), `android` for FCM on Android. */
+export type PushPlatform = 'web' | 'android';
+
 export class MarpokatError extends Error {
   constructor(
     message: string,

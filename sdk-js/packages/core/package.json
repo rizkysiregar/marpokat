@@ -1,6 +1,6 @@
 {
   "name": "@rizkysiregar/marpokat-core",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Marpokat chat client for the browser and Node: connection, state, sync, uploads",
   "type": "module",
   "main": "./dist/index.cjs",

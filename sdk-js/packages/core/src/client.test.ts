@@ -33,16 +33,25 @@ const channel = (over: Partial<Channel> = {}): Channel => ({
   last_message: msg(3), last_message_at: msg(3).created_at, ...over,
 } as unknown as Channel);
 
-interface Server { channels: Channel[]; history: Message[]; changes: Message[]; calls: string[]; expireTokenOnce: boolean }
+interface Server {
+  channels: Channel[]; history: Message[]; changes: Message[]; calls: string[]; expireTokenOnce: boolean;
+  /** Bearer of every request, in order. */
+  auths: string[];
+  /** Answers to POST /v1/devices, in order: a status, or 'offline' for a network failure; 204 once they run out. */
+  deviceReplies: Array<number | 'offline'>;
+}
 
 function makeServer(): { server: Server; fetch: typeof fetch } {
-  const server: Server = { channels: [channel()], history: [msg(1), msg(2), msg(3)], changes: [], calls: [], expireTokenOnce: false };
+  const server: Server = {
+    channels: [channel()], history: [msg(1), msg(2), msg(3)], changes: [], calls: [], expireTokenOnce: false, auths: [], deviceReplies: [],
+  };
   const json = (body: unknown, status = 200) => new Response(status === 204 ? null : JSON.stringify(body), { status });
   const fetchFake = (async (input: string, init: RequestInit = {}) => {
     const url = new URL(input);
     const key = `${init.method ?? 'GET'} ${url.pathname}`;
     server.calls.push(key + url.search);
     const auth = (init.headers as Record<string, string>).Authorization;
+    if (auth !== undefined) server.auths.push(auth);
     if (server.expireTokenOnce && auth === 'Bearer old') { server.expireTokenOnce = false; return json({ error: { code: 'token_expired', message: 'expired' } }, 401); }
     if (key === 'GET /v1/channels') return json({ channels: server.channels, next_cursor: null });
     if (key === 'GET /v1/presence') return json({ users: [{ user_id: 'bob', online: true }] });
@@ -59,6 +68,12 @@ function makeServer(): { server: Server; fetch: typeof fetch } {
     if (key === 'POST /v1/attachments') return json({ attachment: { id: 'att1' }, upload_url: 'https://files.test/put', upload_headers: { 'Content-Type': 'image/png' }, expires_at: '' }, 201);
     if (key === 'POST /v1/attachments/att1/complete') return json({ id: 'att1', status: 'processing', kind: 'image' });
     if (input === 'https://files.test/put') return new Response(null, { status: 200 });
+    if (key === 'POST /v1/devices') {
+      const reply = server.deviceReplies.shift() ?? 204;
+      if (reply === 'offline') throw new TypeError('Failed to fetch');
+      return reply === 204 ? json(null, 204) : json({ error: { code: reply === 400 ? 'validation_failed' : 'http_' + reply, message: 'no' } }, reply);
+    }
+    if (key.startsWith('DELETE /v1/devices/')) return json(null, 204);
     return json({ error: { code: 'not_found', message: key } }, 404);
   }) as unknown as typeof fetch;
   return { server, fetch: fetchFake };
@@ -332,5 +347,98 @@ describe('observing', () => {
     expect(client.getSnapshot().channels).toHaveLength(1);
     expect(client.getSnapshot().messages[CH]).toHaveLength(3);
     expect(client.getSnapshot().status).toBe('connecting');
+  });
+});
+
+describe('push tokens', () => {
+  const posts = () => env.server.calls.filter((c) => c === 'POST /v1/devices').length;
+  const newClient = () => {
+    client = new MarpokatClient({
+      baseUrl: 'https://api.test', apiKey: 'mpk_x', tokenProvider: async () => tokens.shift() ?? 'tok',
+      WebSocketImpl: FakeSocket as unknown as typeof WebSocket, fetchImpl: env.fetch, backoffBase: 100, random: () => 1,
+    });
+    return client;
+  };
+  const reconnect = async () => {
+    FakeSocket.all.at(-1)!.close(1006);
+    await vi.advanceTimersByTimeAsync(101); await settle();
+    FakeSocket.all.at(-1)!.push('auth.ok', { user: me, heartbeat_interval_ms: 25000 });
+    await settle();
+  };
+
+  it('registers before the first connection with a token from the provider, never an empty bearer', async () => {
+    tokens = ['first'];
+    await newClient().registerPushToken('fcm1');
+    expect(env.server.calls).toEqual(['POST /v1/devices']);
+    expect(env.server.auths).toEqual(['Bearer first']);
+  });
+
+  it('sends the platform it is given, web by default', async () => {
+    const bodies: unknown[] = [];
+    const inner = env.fetch;
+    env.fetch = (async (input: string, init: RequestInit = {}) => { if (init.body) bodies.push(JSON.parse(init.body as string)); return inner(input, init); }) as typeof fetch;
+    await newClient().registerPushToken('fcm1');
+    await client.registerPushToken('fcm2', 'android');
+    expect(bodies).toEqual([{ platform: 'web', push_token: 'fcm1' }, { platform: 'android', push_token: 'fcm2' }]);
+  });
+
+  it('retries with backoff while the server cannot be reached', async () => {
+    env.server.deviceReplies = ['offline', 503];
+    await newClient().registerPushToken('fcm1'); // does not throw: the client keeps the token
+    expect(posts()).toBe(1);
+    await vi.advanceTimersByTimeAsync(101);
+    expect(posts()).toBe(2); // after 100 ms
+    await vi.advanceTimersByTimeAsync(150);
+    expect(posts()).toBe(2);
+    await vi.advanceTimersByTimeAsync(60);
+    expect(posts()).toBe(3); // after 200 ms, and it is accepted
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    expect(posts()).toBe(3);
+  });
+
+  it('keeps a token refused for its credentials until the next connection', async () => {
+    env.server.deviceReplies = [401];
+    await newClient().registerPushToken('fcm1');
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    expect(posts()).toBe(1); // no asking again and again with credentials that do not work
+    await client.connect(); await settle();
+    FakeSocket.all.at(-1)!.push('auth.ok', { user: me, heartbeat_interval_ms: 25000 });
+    await settle();
+    expect(posts()).toBe(2);
+  });
+
+  it('sends an accepted token again once a day, not on every reconnect', async () => {
+    await start();
+    await client.registerPushToken('fcm1');
+    await reconnect();
+    expect(posts()).toBe(1);
+    await vi.advanceTimersByTimeAsync(24 * 3_600_000);
+    await reconnect();
+    expect(posts()).toBe(2);
+  });
+
+  it('throws and forgets a token the server refuses', async () => {
+    await start();
+    env.server.deviceReplies = [400];
+    await expect(client.registerPushToken('bad token')).rejects.toMatchObject({ status: 400, code: 'validation_failed' });
+    await reconnect();
+    expect(posts()).toBe(1);
+  });
+
+  it('stops retrying once the token is unregistered, and removes it on the server', async () => {
+    env.server.deviceReplies = ['offline'];
+    await newClient().registerPushToken('fcm 1/x');
+    await client.unregisterPushToken('fcm 1/x');
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    expect(posts()).toBe(1);
+    expect(env.server.calls).toContain('DELETE /v1/devices/fcm%201%2Fx');
+  });
+
+  it('forgets the token on reset', async () => {
+    env.server.deviceReplies = ['offline'];
+    await newClient().registerPushToken('fcm1');
+    await client.reset();
+    await vi.advanceTimersByTimeAsync(3_600_000);
+    expect(posts()).toBe(1);
   });
 });
