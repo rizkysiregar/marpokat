@@ -1,6 +1,6 @@
 import {
   type Attachment, type Channel, type ChannelState, type ClientOptions, type ConnectionStatus, type Message, MarpokatError,
-  type PendingMessage, type Snapshot, type UploadInput, type User,
+  type PendingMessage, type PushPlatform, type Snapshot, type UploadInput, type User,
 } from './types';
 
 type Listener = () => void;
@@ -8,6 +8,9 @@ type Frame = { type: string; id?: string; data?: any };
 
 const PROTOCOL_VERSION = 1;
 const MAX_BACKOFF_MS = 30_000;
+const MAX_PUSH_RETRY_MS = 300_000;
+/** A push token the server accepted is sent again after this long, on the next connection: servers trim old ones. */
+const PUSH_TOKEN_REFRESH_MS = 24 * 60 * 60 * 1000;
 
 /**
  * The Marpokat client: one WebSocket, the REST API, and the state a chat screen needs (channels, messages, unread,
@@ -44,6 +47,11 @@ export class MarpokatClient {
   private channelsLoading: Promise<void> | null = null;
   private lastTyping = 0;
   private notify = false;
+  private push: { token: string; platform: PushPlatform } | null = null; // what the app asked to register
+  private pushSentAt: number | null = null; // when the server accepted it, null while it has not
+  private pushTimer: ReturnType<typeof setTimeout> | undefined;
+  private pushAttempt = 0;
+  private pushGen = 0; // bumped whenever the token changes: an older send in flight then changes nothing
 
   constructor(options: ClientOptions) {
     this.opt = { backoffBase: 500, pageSize: 50, ...options, baseUrl: options.baseUrl.replace(/\/+$/, '') };
@@ -122,6 +130,7 @@ export class MarpokatClient {
     for (const m of this.typing.values()) for (const t of m.values()) clearTimeout(t);
     this.typing.clear();
     this.me = null; this.current = null; this.token = '';
+    this.forgetPushToken();
     await this.opt.cache?.clear();
     this.status = 'idle';
     this.changed();
@@ -193,10 +202,19 @@ export class MarpokatClient {
       this.setStatus('connected', `sync failed: ${(e as Error).message}`);
     }
     for (const p of this.pending.values()) if (p.status === 'sending') this.transmit(p); // 7.6: same client_msg_id
+    // a token still waiting for its retry goes now that the server is reachable; one already accepted goes again
+    // once a day, so the server keeps it as a device in use, not on every reconnect
+    if (this.push && (this.pushSentAt === null || Date.now() - this.pushSentAt >= PUSH_TOKEN_REFRESH_MS)) {
+      clearTimeout(this.pushTimer);
+      this.pushAttempt = 0;
+      void this.sendPushToken(++this.pushGen, false);
+    }
   }
 
   // ------------------------------------------------------------------ REST
   async api<T = any>(path: string, init: { method?: string; body?: unknown } = {}, retried = false): Promise<T> {
+    // before the first connection there is no token yet: a request without one would only be refused
+    if (!this.token) this.token = await this.opt.tokenProvider();
     const res = await this.fetchImpl(this.opt.baseUrl + path, {
       method: init.method ?? 'GET',
       headers: {
@@ -514,6 +532,63 @@ export class MarpokatClient {
   typingStop(channelId: string): void {
     this.lastTyping = 0;
     this.sendFrame('typing.stop', { channel_id: channelId });
+  }
+
+  // ------------------------------------------------------------------ push tokens
+  /**
+   * Call after sign-in and whenever the push token changes (on the web: what Firebase `getToken` gives, at every page
+   * load); calling it before {@link connect} is fine. The client keeps the token: it is sent at once (with a token
+   * from the provider when there is no connection yet), retried with backoff while the server cannot be reached, and
+   * sent again on the first connection of every day, so the server keeps it as a device in use. Resolves once the
+   * server accepted it or it is kept for later.
+   *
+   * @throws MarpokatError when the server refuses the token itself (400): it is not kept, sending it again cannot help.
+   */
+  async registerPushToken(token: string, platform: PushPlatform = 'web'): Promise<void> {
+    clearTimeout(this.pushTimer);
+    this.push = { token, platform };
+    this.pushSentAt = null;
+    this.pushAttempt = 0;
+    await this.sendPushToken(++this.pushGen, true);
+  }
+
+  /** Call on sign-out, before {@link reset}, so that this device stops getting pushes for this user. */
+  async unregisterPushToken(token: string): Promise<void> {
+    if (this.push?.token === token) this.forgetPushToken();
+    await this.api(`/v1/devices/${encodeURIComponent(token)}`, { method: 'DELETE' });
+  }
+
+  private forgetPushToken(): void {
+    clearTimeout(this.pushTimer);
+    this.push = null;
+    this.pushSentAt = null;
+    this.pushAttempt = 0;
+    this.pushGen++;
+  }
+
+  /** Sends the push token once; when that fails for a reason that can pass, plans the next attempt. */
+  private async sendPushToken(gen: number, throwRefusal: boolean): Promise<void> {
+    const push = this.push;
+    if (!push || gen !== this.pushGen) return;
+    try {
+      await this.api('/v1/devices', { method: 'POST', body: { platform: push.platform, push_token: push.token } });
+      if (gen === this.pushGen) { this.pushSentAt = Date.now(); this.pushAttempt = 0; }
+    } catch (e) {
+      if (gen !== this.pushGen) return; // the token changed meanwhile
+      if (e instanceof MarpokatError && e.status !== undefined) {
+        if (e.status === 400) { // the token itself is refused
+          this.forgetPushToken();
+          if (throwRefusal) throw e;
+          return;
+        }
+        // refused credentials (401, 403) wait for the next connection, which gets a token that works, rather than
+        // asking again and again with one that does not; overloaded or down is tried again soon
+        if (e.status !== 429 && e.status < 500) return;
+      }
+      // network, no token from the provider yet, or the server overloaded
+      const delay = Math.min(MAX_PUSH_RETRY_MS, this.opt.backoffBase * 2 ** this.pushAttempt++);
+      this.pushTimer = setTimeout(() => void this.sendPushToken(gen, false), delay);
+    }
   }
 
   // ------------------------------------------------------------------ cache

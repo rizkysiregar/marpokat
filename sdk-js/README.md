@@ -24,6 +24,13 @@ The client keeps the rules of `spec/events.md` for you: auth in the first frame,
 detection, reconnect with full jitter followed by sync, and idempotent sends (a message written offline goes out once
 the connection is back, with the same `client_msg_id`). Types come from `spec/openapi.yaml` (`npm run gen`).
 
+Push (FCM web push): after sign-in and at every page load, pass the token Firebase `getToken` gives to
+`client.registerPushToken(token)` (`'web'` by default, `'android'` for FCM on Android). It can be called before
+`connect()`: the client keeps the token, retries while the server cannot be reached and sends it again on the first
+connection of every day. On sign-out call `client.unregisterPushToken(token)` before `client.reset()`. Pushes are
+data-only (`spec/events.md` section 11), so the service worker shows them itself: `parsePush(payload.data)` gives a
+typed `PushMessage` (with a ready `title`), or `null` for pushes that are not Marpokat's.
+
 ```bash
 npm install
 npm run typecheck && npm test && npm run build
