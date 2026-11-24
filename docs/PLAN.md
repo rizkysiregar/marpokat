@@ -697,3 +697,4 @@ kemungkinan untuk semuanya.
 | 2026-11-24 | D77: perubahan tenant diumumkan ke semua pod; WebSocket tenant yang dimatikan/dihapus ditutup 4003, cache API key dibuang |
 | 2026-11-24 | D78 (label proyek, tanpa konsep environment), D79 (suspend/delete/delete now/restore proyek oleh admin, e-mail ke pemilik, purge 1 menit). Console API 0.4.0 |
 | 2026-11-24 | D80: suspend/hapus akun oleh admin (langsung atau masa tenggang), hapus akun sendiri di portal (masa tenggang 3 hari), purge akun + proyeknya. Console API 0.5.0 |
+| 2026-11-24 | SDK Android 0.2.0: `client.incoming` (pesan baru dari orang lain secara live) untuk banner di dalam aplikasi Narrativ |

@@ -2,6 +2,8 @@ package com.rizkysiregar.marpokat
 
 import com.google.common.truth.Truth.assertThat
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
@@ -339,5 +341,45 @@ class MarpokatClientTest {
         assertThat(state.channels).hasSize(1)
         assertThat(state.messages[CH]).hasSize(3)
         assertThat(state.status).isEqualTo(ConnectionStatus.Connecting)
+    }
+
+    private fun TestScope.collectIncoming(): MutableList<IncomingMessage> {
+        val got = mutableListOf<IncomingMessage>()
+        backgroundScope.launch { client.incoming.toList(got) }
+        runCurrent()
+        return got
+    }
+
+    @Test fun announcesLiveMessagesFromOthersOnceAndNothingElse() = runClientTest {
+        val ws = start()
+        val got = collectIncoming()
+        ws.push("message.new", """{"message":${msg(4)}}"""); runCurrent()
+        ws.push("message.new", """{"message":${msg(4)}}"""); runCurrent()                  // the same message again
+        ws.push("message.new", """{"message":${msg(5, sender = me)}}"""); runCurrent()      // my own, from another device
+        ws.push("message.new", """{"message":${msg(6, extra = ",\"type\":\"system\"").replace("\"type\":\"text\",", "")}}"""); runCurrent()
+        ws.push("message.updated", """{"message":${msg(4, "edited", rev = 7)}}"""); runCurrent() // an edit is not new
+        assertThat(got.map { it.message.id }).containsExactly("m4")
+        assertThat(got.single().channel.id).isEqualTo(CH)
+        assertThat(got.single().isOpen).isFalse()
+    }
+
+    @Test fun saysWhenTheConversationIsOpenAndSkipsWhatASyncBringsBack() = runClientTest {
+        val ws = start(); client.openChannel(CH); runCurrent()
+        val got = collectIncoming()
+        fake.changes = listOf(msg(4), msg(5), msg(6)); fake.changeRevs = listOf(4, 5, 6)
+        ws.push("message.new", """{"message":${msg(6)}}"""); runCurrent() // 4 and 5 were missed: they come by sync
+        advanceTimeBy(200); runCurrent()
+        assertThat(state.messages[CH]!!.map { it.seq }).containsAtLeast(4L, 5L, 6L)
+        assertThat(got.map { it.message.id }).containsExactly("m6")
+        assertThat(got.single().isOpen).isTrue()
+    }
+
+    @Test fun announcesTheFirstMessageOfAConversationThatWasNotLoadedYet() = runClientTest {
+        val ws = start()
+        val got = collectIncoming()
+        fake.channels = listOf(channel(), channel().replace("\"id\":\"$CH\"", "\"id\":\"ch-2\""))
+        ws.push("message.new", """{"message":${msg(1).replace("\"channel_id\":\"$CH\"", "\"channel_id\":\"ch-2\"")}}"""); runCurrent()
+        assertThat(got.map { it.channel.id }).containsExactly("ch-2")
+        assertThat(state.channel("ch-2")).isNotNull()
     }
 }

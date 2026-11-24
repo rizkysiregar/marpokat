@@ -21,6 +21,15 @@ client.state.collect { state -> /* channels, messages, pending, typing, online, 
 client.openChannel(id); client.send(id, "hi"); client.react(messageId, "👍")
 ```
 
+While the app is open, `client.incoming` (a `SharedFlow<IncomingMessage>`) gives one event per message from someone
+else as it arrives live: not your own, not system messages, not what a sync brings back, never twice. Use it for an
+in-app banner; `isOpen` says the conversation is on screen already. When the app is closed the server sends a push
+instead (below).
+
+```kotlin
+client.incoming.collect { e -> if (!e.isOpen) showBanner(e.channel, e.message) }
+```
+
 Push (FCM): register the token with `client.registerPushToken(token)` on login and in `onNewToken`, remove it on
 logout with `unregisterPushToken`. In `onMessageReceived` use `MarpokatPush.parse(message.data)` to get a typed
 `PushMessage` (`null` for pushes that are not Marpokat's); `push.channelId` is what the notification opens.
